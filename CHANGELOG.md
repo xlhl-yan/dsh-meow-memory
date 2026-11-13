@@ -14,6 +14,13 @@
 - 已知代价：clone 自带 `.dsh-meow/` 的仓库时，预置记忆会被直接当成本人记忆注入。
   自用场景下这个代价可接受。
 
+### 设置页同步
+
+- `trustByDefault` 与 `hitMinCoverage` 都已进入设置页「记忆 Memory」区块（此前只加了
+  config schema，界面上没有入口，只能改 cordis.patch.yml）。
+- 三套语言包（zh / en / pt-br）与 `src/i18n/keys.ts` 的 `UI_KEYS` 白名单同步补齐，
+  `settings-page` 的「无多余键」校验通过。
+
 ## v0.33.0 (2026-11-13) — 召回链路重做（fork 分支）
 
 ### 修复：长会话里每消息命中恒为 0（候选池被三重过滤清零）

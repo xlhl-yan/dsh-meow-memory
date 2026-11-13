@@ -92,6 +92,7 @@ const FIELDS: GroupSpec[] = [
     title: 'settings.group.inject',
     fields: [
       { key: 'hitTopK', label: 'settings.field.hitTopK.label', type: 'num', hint: 'settings.field.hitTopK.hint' },
+      { key: 'hitMinCoverage', label: 'settings.field.hitMinCoverage.label', type: 'num', hint: 'settings.field.hitMinCoverage.hint' },
       { key: 'titleMax', label: 'settings.field.titleMax.label', type: 'num', hint: 'settings.field.titleMax.hint' },
     ],
   },
@@ -133,6 +134,7 @@ const FIELDS: GroupSpec[] = [
       { key: 'projectDir', label: 'settings.field.projectDir.label', type: 'str', hint: 'settings.field.projectDir.hint', placeholder: '.dsh-meow' },
       { key: 'homeDir', label: 'settings.field.homeDir.label', type: 'homeDir', hint: 'settings.field.homeDir.hint', placeholder: 'D:\\data\\meow-memory' },
       { key: 'autoMigrate', label: 'settings.field.autoMigrate.label', type: 'bool', hint: 'settings.field.autoMigrate.hint' },
+      { key: 'trustByDefault', label: 'settings.field.trustByDefault.label', type: 'bool', hint: 'settings.field.trustByDefault.hint' },
     ],
   },
 ]
