@@ -342,7 +342,7 @@ function rememberTool(dir: string): ToolDefinition {
   }
 }
 
-function searchTool(dir: string): ToolDefinition {
+function searchTool(dir: string, contentMaxDefault = 400): ToolDefinition {
   return {
     name: 'memory_search',
     description: T('memory_search.description'),
@@ -357,7 +357,7 @@ function searchTool(dir: string): ToolDefinition {
         status: { type: 'string', description: T('memory_search.param.status') },
         days: { type: 'integer', minimum: 1, maximum: 3650, description: T('memory_search.param.days') },
         k: { type: 'integer', minimum: 1, maximum: 50, default: 10, description: T('memory_search.param.k') },
-        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: 400, description: T('memory_search.param.content_max') },
+        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: contentMaxDefault, description: T('memory_search.param.content_max') },
         explain: { type: 'boolean', default: false, description: T('memory_search.param.explain') },
       },
     },
@@ -403,7 +403,7 @@ function searchTool(dir: string): ToolDefinition {
         const v = value as { note?: string; hits?: Array<{ id?: string; level?: string; content?: string; keywords?: unknown; project?: string | null; updated_at?: number | null; score?: number; explain?: { bm25?: number; importance?: number; recencyWeight?: number; status?: string } }> }
         // v0.34.0（用户需求）：render 此前忽略 args，content_max 形同虚设——传 600 也没用。
         const cmArg = coerceNumber((args as { content_max?: unknown } | undefined)?.content_max)
-        const contentMax = cmArg !== undefined ? Math.max(0, Math.min(5000, Math.round(cmArg))) : 400
+        const contentMax = cmArg !== undefined ? Math.max(0, Math.min(5000, Math.round(cmArg))) : contentMaxDefault
         const lines = [String(v.note ?? '')]
         for (const h of v.hits ?? []) {
           // 检索元数据视图：归属 + id + 相对时间 + 关键词（无关键词回退原文开头）。
@@ -461,7 +461,7 @@ function searchTool(dir: string): ToolDefinition {
       const kRaw = coerceNumber(parsed.k)
       const k = kRaw !== undefined ? Math.max(1, Math.min(50, Math.round(kRaw))) : 10
       const cmRaw = coerceNumber(parsed.content_max)
-      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 400
+      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : contentMaxDefault
 
       const levels: Level[] = typeof parsed.level === 'string' && parsed.level.trim()
         ? parsed.level.split(',').map((s) => s.trim()).filter((s): s is Level => (LEVELS as readonly string[]).includes(s))
@@ -549,7 +549,7 @@ function searchTool(dir: string): ToolDefinition {
   }
 }
 
-function findSimilarTool(dir: string): ToolDefinition {
+function findSimilarTool(dir: string, contentMaxDefault = 400): ToolDefinition {
   return {
     name: 'memory_find_similar',
     description: T('memory_find_similar.description'),
@@ -560,7 +560,7 @@ function findSimilarTool(dir: string): ToolDefinition {
       properties: {
         id: { type: 'string', description: T('memory_find_similar.param.id') },
         k: { type: 'integer', minimum: 1, maximum: 20, default: 5, description: T('memory_find_similar.param.k') },
-        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: 200, description: T('memory_find_similar.param.content_max') },
+        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: contentMaxDefault, description: T('memory_find_similar.param.content_max') },
       },
     },
     output: {
@@ -611,7 +611,7 @@ function findSimilarTool(dir: string): ToolDefinition {
       const kRaw = coerceNumber(parsed.k)
       const k = kRaw !== undefined ? Math.max(1, Math.min(20, Math.round(kRaw))) : 5
       const cmRaw = coerceNumber(parsed.content_max)
-      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 400
+      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : contentMaxDefault
 
       const rows = LEVELS.flatMap((lv) => (lv === 'soul' || lv === 'user' ? [] : db.listSearchable(lv)))
       const candidates = rows.filter((r) => r.id !== found.row.id && !seen.has(r.id) && r.source_session !== sessionId)
@@ -929,11 +929,11 @@ function homeTool(): ToolDefinition {
   }
 }
 
-export function registerMemoryTools(register: (t: ToolDefinition) => void, dir = '.dsh-meow'): void {
+export function registerMemoryTools(register: (t: ToolDefinition) => void, dir = '.dsh-meow', contentMaxDefault = 400): void {
   // 门控判定器经 setMemoryToolGate 注入（apply 期设置；工具工厂签名保持不变）。
   register(rememberTool(dir))
-  register(searchTool(dir))
-  register(findSimilarTool(dir))
+  register(searchTool(dir, contentMaxDefault))
+  register(findSimilarTool(dir, contentMaxDefault))
   register(readTool(dir))
   register(updateTool(dir))
   register(projectTool(dir))

@@ -91,6 +91,8 @@ export const zh: Record<UiKey, string> = {
   'settings.field.hitTopK.hint': '关键词命中注入的条目上限（fact/lesson/rules/topic）',
   'settings.field.hitMinCoverage.label': '命中覆盖率门槛',
   'settings.field.hitMinCoverage.hint': '记忆关键词被消息命中的比例低于此值就不注入（0=关闭，0.4=推荐）',
+  'settings.field.searchContentMax.label': '搜索结果正文长度',
+  'settings.field.searchContentMax.hint': 'memory_search / memory_find_similar 每条命中默认显示多少字正文，0=全文',
   'settings.field.titleMax.label': '导引标题截断长度',
   'settings.field.titleMax.hint': '记忆导引里项目列表的截断长度（字符）',
   'settings.field.reflect.label': '自动反思',

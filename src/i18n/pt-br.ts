@@ -93,6 +93,8 @@ export const ptBr: Record<UiKey, string> = {
   'settings.field.hitTopK.hint': 'Limite de entradas por acerto de palavra-chave injetadas a cada mensagem (fact/lesson/rules/topic)',
   'settings.field.hitMinCoverage.label': 'Limiar de cobertura do acerto',
   'settings.field.hitMinCoverage.hint': 'Não injeta quando a fração de palavras-chave da memória encontradas na mensagem fica abaixo deste valor (0 = desligado, 0.4 = recomendado)',
+  'settings.field.searchContentMax.label': 'Comprimento do corpo nos resultados',
+  'settings.field.searchContentMax.hint': 'Caracteres padrão do corpo mostrados por acerto em memory_search / memory_find_similar; 0 = texto completo',
   'settings.field.titleMax.label': 'Comprimento de corte do título',
   'settings.field.titleMax.hint': 'Comprimento (em caracteres) do corte da lista de projetos no guia de memória',
   'settings.field.reflect.label': 'Reflexão automática',

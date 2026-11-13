@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.35.0 (2026-11-13) — 截断长度进设置页（fork 分支）
+
+### 新增：`searchContentMax` 配置项（默认 400）
+
+- 用户要求：`memory_search` 返回正文的截断长度不该写死在代码里，要能在表单里调。
+- 改法：新增 `searchContentMax`，作为 `memory_search` 与 `memory_find_similar` 的
+  `content_max` 参数默认值；模型仍可在单次调用里用 `content_max` 覆盖。
+- 0 = 全文，>0 = 截断并加 `…`。
+- 落在设置页「记忆 → 注入」组，三套语言包 + `UI_KEYS` 白名单同步。
+- 工具工厂签名扩展：`registerMemoryTools(register, dir, contentMaxDefault)`，
+  schema 的 `default` 也随配置走（此前是硬编码常量）。
+
 ## v0.34.0 (2026-11-13) — memory_search 返回正文（fork 分支）
 
 ### 修复：搜索只给关键词，模型必须再 memory_read 一次

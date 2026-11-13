@@ -102,6 +102,8 @@ export const en: Record<UiKey, string> = {
   'settings.field.hitTopK.hint': 'Upper bound on keyword-hit entries injected per message (fact/lesson/rules/topic)',
   'settings.field.hitMinCoverage.label': 'Hit coverage threshold',
   'settings.field.hitMinCoverage.hint': 'Skip injection when the share of memory keywords matched by the message is below this value (0 = off, 0.4 = recommended)',
+  'settings.field.searchContentMax.label': 'Search result body length',
+  'settings.field.searchContentMax.hint': 'Default characters of body shown per hit in memory_search / memory_find_similar; 0 = full text',
   'settings.field.titleMax.label': 'Guide title truncation length',
   'settings.field.titleMax.hint': 'Truncation length (characters) of the project list in the memory guide',
   'settings.field.reflect.label': 'Automatic reflection',

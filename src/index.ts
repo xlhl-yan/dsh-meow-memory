@@ -236,6 +236,10 @@ const config = z.object({
    *  存放，换目录等于旧注册表全部失效，既有工作区会集体回落未信任）。
    *  默认 true（用户拍板 2026-11-13）。需要防护时置 false 即恢复原行为。 */
   trustByDefault: z.boolean().default(true),
+  /** memory_search / memory_find_similar 每条命中默认显示多少字正文（0=全文）。
+   *  用户拍板 2026-11-13：截断长度要能在设置页调，别写死在代码里。
+   *  这是工具参数的默认值；模型仍可在单次调用里用 content_max 覆盖。 */
+  searchContentMax: z.number().min(0).max(5000).default(400),
   /** 导引标题截断长度。 */
   titleMax: z.number().min(10).max(200).default(40),
   /** 是否在 ReAct 任务结束后自动注入反思。 */
@@ -439,6 +443,8 @@ interface ResolvedConfig {
   hitMinCoverage: number
   /** 默认信任工作区记忆库（关掉 #64 预置库防护）。 */
   trustByDefault: boolean
+  /** 命中正文默认截断长度（0=全文）；memory_search / find_similar 共用。 */
+  searchContentMax: number
   titleMax: number
   reflect: boolean
   reflectTurns: number
@@ -465,6 +471,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     hitTopK: c.hitTopK ?? 2,
     hitMinCoverage: c.hitMinCoverage ?? 0.4,
     trustByDefault: c.trustByDefault ?? true,
+    searchContentMax: c.searchContentMax ?? 400,
     titleMax: c.titleMax ?? 40,
     reflect: c.reflect ?? true,
     reflectTurns: c.reflectTurns ?? 7,
@@ -1257,7 +1264,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
   registerMemoryTools((t) => {
     const dispose = ctx.tools.register(t)
     if (typeof dispose === 'function') toolDisposers.push(dispose)
-  }, resolved.projectDir)
+  }, resolved.projectDir, resolved.searchContentMax)
   // 会话列表"已 dream"小月牙信号（用户拍板 2026-08-19）：dream 开始推 dreaming、
   // 完成推 dreamed、有新活动推 active。
   const broadcast = new DreamStateBroadcast(ctx.logger)

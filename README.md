@@ -83,6 +83,7 @@ dsh plugin --profile web add github:coutogilson/dsh-meow-memory
     hitTopK: 2             # 每条用户消息关键词命中的条目数上限
     hitMinCoverage: 0.4    # 命中覆盖率门槛（0..1）：记忆关键词有多大比例被消息命中才注入；0=关闭
     trustByDefault: true   # 默认信任工作区自带的记忆库（关闭 #64 预置库防护）；false 恢复 /meow-trust 门
+    searchContentMax: 400  # memory_search / find_similar 每条命中默认显示多少字正文；0=全文
     dream:
       enabled: true
       idleMinutes: 180     # 窗口空闲 ≥180 分钟（3 小时）允许 dream
