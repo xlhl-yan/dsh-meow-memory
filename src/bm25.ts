@@ -231,6 +231,10 @@ export interface RankedHit {
   importance: number
   updated_at: number
   score: number
+  /** 文档关键词覆盖率（正文/标题 token 中有多大比例被查询命中）。命中链路用它做
+   *  绝对门槛：没有门槛时 raw>0 即入候选，长文档靠通用词就能挤进 top-K。
+   *  仅 keywordHitScore 计算并返回。 */
+  coverage?: number
   /** 分项得分（#51，explain=true 时才有）：bm25=关键词原始分、importance=条目重要度、
    *  recencyWeight=艾宾浩斯权重（importance≥3 或分数贴近榜首时不衰减，恒 1）、
    *  score=最终分（bm25 × recencyWeight）。状态过滤（active/stale）是检索前的二值
@@ -244,6 +248,9 @@ export interface SearchOptions {
   now?: number | null
   /** 附带每条命中的分项得分（#51 可解释检索）：只加字段，不改排序。 */
   explain?: boolean
+  /** 最低覆盖率门槛（0..1，仅 keywordHitScore 生效）：coverage 低于它的候选直接淘汰。
+   *  不传 = 旧行为（raw>0 即入榜）。 */
+  minCoverage?: number
 }
 
 /**
@@ -341,6 +348,9 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
 
   const n = docs.length
   const docToks = docs.map((d) => keep(tokenize([d.content, d.title ?? ''].join(' '))))
+  // 覆盖率分母用**去重 token 数**：正文与标题常互相重复（topic 的 title 就是正文首句），
+  // 按数组长度算会让分母翻倍、覆盖率腰斩，长 title 的条目永远过不了门槛。
+  const docLens = docToks.map((toks) => new Set(toks).size)
   const df = new Map<string, number>()
   const tf: Array<Map<string, number>> = []
   for (const toks of docToks) {
@@ -369,10 +379,11 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
   const out: RankedHit[] = []
   for (let di = 0; di < docs.length; di++) {
     if (raw[di] <= 0) continue
-    const len = docToks[di].length
+    const len = docLens[di]
     let overlap = 0
     for (const t of qTf.keys()) if (tf[di].has(t)) overlap++
     const coverage = len > 0 ? overlap / len : 0
+    if (opts.minCoverage !== undefined && coverage < opts.minCoverage) continue
     let w = 1
     if (now !== null && docs[di].importance < 3 && !(raw[di] >= 0.85 * maxRaw)) {
       w = recencyWeight(now - (docs[di].last_accessed_at ?? docs[di].updated_at)) // #91 同 search：按最后使用时间衰减
@@ -387,6 +398,7 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
       importance: docs[di].importance,
       updated_at: docs[di].updated_at,
       score: raw[di] * coverage * w * impW * (titleHit ? 1.2 : 1),
+      coverage,
     })
   }
   out.sort((a, b) => b.score - a.score)

@@ -228,6 +228,9 @@ const config = z.object({
   homeDirPresets: z.dict(z.string()).default(homeDirPresetsDefault()),
   /** 关键词命中条数上限（fact/lesson/rules/topic 短条目，每条用户消息命中注入）。 */
   hitTopK: z.number().min(0).max(10).default(2),
+  /** 命中最低覆盖率门槛（0..1）：记忆关键词有多大比例被本轮消息命中才允许注入。
+   *  0 = 关闭门槛（旧行为：重叠一个 bigram 就注入，长会话里几乎全是噪声）。 */
+  hitMinCoverage: z.number().min(0).max(1).default(0.4),
   /** 导引标题截断长度。 */
   titleMax: z.number().min(10).max(200).default(40),
   /** 是否在 ReAct 任务结束后自动注入反思。 */
@@ -331,6 +334,7 @@ export function validateConfigUserLayer(value: unknown): void {
   reqStr('projectDir')
   reqStr('homeDir')
   reqNum('hitTopK')
+  reqNum('hitMinCoverage')
   reqNum('titleMax')
   reqBool('reflect')
   reqNum('reflectTurns')
@@ -427,6 +431,7 @@ interface ResolvedConfig {
   /** 原样透传（'default'|'dsh-storage'|'plugin-root'|绝对路径|undefined）；绝对路径化在 resolveHomeDir。 */
   homeDir: string | undefined
   hitTopK: number
+  hitMinCoverage: number
   titleMax: number
   reflect: boolean
   reflectTurns: number
@@ -451,6 +456,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     projectDir: c.projectDir ?? '.dsh-meow',
     homeDir: typeof c.homeDir === 'string' ? c.homeDir : undefined,
     hitTopK: c.hitTopK ?? 2,
+    hitMinCoverage: c.hitMinCoverage ?? 0.4,
     titleMax: c.titleMax ?? 40,
     reflect: c.reflect ?? true,
     reflectTurns: c.reflectTurns ?? 7,
@@ -710,7 +716,7 @@ const SETTINGS_SOURCE_WAIT_MS = 250
 // 注册期消费的字段（projectDir/homeDir/enabled/delegate.modelSpec + setPromptLang 的
 // 启动调用）保持冻结：热改需要 dispose+重入，设置页按「需重载」语义对待（#26 同口径）。
 
-const LIVE_CONFIG_KEYS = ['hitTopK', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
+const LIVE_CONFIG_KEYS = ['hitTopK', 'hitMinCoverage', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
 const LIVE_DREAM_KEYS = ['enabled', 'idleMinutes', 'suppressWindows', 'suppressLeadMinutes', 'checkMinutes', 'timeZone', 'rulesReviewDays'] as const
 
 /** 工作区是否在停用名单（归一后精确匹配）。导出供测试直调。 */
@@ -1507,6 +1513,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const reinj = buildReinjection(db, ws, sid, readProjectQueried(ws, sid, resolved.projectDir), {
         hitTopK: resolved.hitTopK,
         titleMax: resolved.titleMax,
+        hitMinCoverage: resolved.hitMinCoverage,
       }, resolved.projectDir)
       clearReinjectPending(ws, sid, resolved.projectDir)
       if (reinj !== null) {

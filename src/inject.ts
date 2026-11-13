@@ -21,9 +21,28 @@ export interface InjectOptions {
   hitTopK: number
   /** 导引里 project/topic 标题超长截断长度。 */
   titleMax: number
+  /** 命中最低覆盖率门槛（0..1）：记忆关键词有多大比例被本轮消息命中才允许注入。
+   *  没有门槛时「重叠一个 bigram」就能挤进 top-K，长会话里几乎全是噪声。 */
+  hitMinCoverage: number
 }
 
-const DEFAULT_OPTS: InjectOptions = { hitTopK: 2, titleMax: 40 }
+const DEFAULT_OPTS: InjectOptions = { hitTopK: 2, titleMax: 40, hitMinCoverage: 0.4 }
+
+/** 命中查询的文本上限：从用户消息里取这么多字符做关键词匹配。
+ *  旧值是 500——桥接/预设会在真实内容前拼大段说明模板，500 字常常只覆盖到模板，
+ *  真实诉求永远匹配不到（长会话实测命中率 0%）。4000 覆盖绝大多数消息全文。 */
+const MAX_QUERY_CHARS = 4000
+
+/** 「最近注入窗口」长度：命中去重只看最近这么多条注入记录，而不是整会话的注入全集。
+ *  旧语义（整会话 excluded）在长会话里会把候选池清零——本会话写的记忆先被
+ *  source_session 排除，剩下的又全在 injected 里，最终没有一条能再被命中。 */
+export const MAX_RECENT_INJECTED = 40
+
+/** 短条目阈值（token 数）与它的宽松覆盖率门槛：只有寥寥几个关键词的条目（早期无
+ *  keywords、回退正文前 100 字的旧数据），覆盖率分母小，按长条目门槛会被一律误伤。
+ *  实测正常记忆 token 数最小 14、中位 33，所以这一档只对旧数据/极短条目生效。 */
+const SHORT_DOC_TOKENS = 10
+const SHORT_DOC_MIN_COVERAGE = 0.15
 
 export function sessionsFile(workspace: string, sessionId: string, dir = '.dsh-meow'): string {
   // 会话 id 可能含 Windows 文件名非法字符（#56：飞书桥 lark-link:dm:…:0 的冒号）——
@@ -39,6 +58,10 @@ export function sessionsFile(workspace: string, sessionId: string, dir = '.dsh-m
  *  accessed 只服务 dream 扫尾范围（读过的条目该被复查），不参与命中去重。 */
 export interface SessionSeen {
   injected: string[]
+  /** 命中去重窗口（滑动）：最近 MAX_RECENT_INJECTED 条注入 id。命中链路只看它，
+   *  不看 injected 全集——否则长会话里注入过的记忆永不再现。首轮快照也会记进来
+   *  （同一批内容不该在紧接着的几轮里重复出现）。 */
+  recentInjected: string[]
   searched: string[]
   accessed: string[]
   /** 本会话写工具落库过的记忆 id（v0.23.0）：memory_remember（新建/合并）与
@@ -68,6 +91,7 @@ function readSeenFile(workspace: string, sessionId: string, dir: string): Sessio
     const parsed = JSON.parse(text) as Record<string, unknown>
     return {
       injected: Array.isArray(parsed.injected) ? parsed.injected.filter((x): x is string => typeof x === 'string') : [],
+      recentInjected: Array.isArray(parsed.recentInjected) ? parsed.recentInjected.filter((x): x is string => typeof x === 'string') : [],
       searched: Array.isArray(parsed.searched) ? parsed.searched.filter((x): x is string => typeof x === 'string') : [],
       accessed: Array.isArray(parsed.accessed) ? parsed.accessed.filter((x): x is string => typeof x === 'string') : [],
       written: Array.isArray(parsed.written) ? parsed.written.filter((x): x is string => typeof x === 'string') : [],
@@ -76,7 +100,7 @@ function readSeenFile(workspace: string, sessionId: string, dir: string): Sessio
       currentProject: typeof parsed.currentProject === 'string' && parsed.currentProject.length > 0 ? parsed.currentProject : null,
     }
   } catch {
-    return { injected: [], searched: [], accessed: [], written: [], projectsQueried: [], reinjectPending: false, currentProject: null }
+    return { injected: [], recentInjected: [], searched: [], accessed: [], written: [], projectsQueried: [], reinjectPending: false, currentProject: null }
   }
 }
 
@@ -86,6 +110,7 @@ function writeSeenFile(workspace: string, sessionId: string, seen: SessionSeen, 
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, JSON.stringify({
     injected: seen.injected,
+    recentInjected: seen.recentInjected,
     searched: seen.searched,
     accessed: seen.accessed,
     written: seen.written,
@@ -100,13 +125,17 @@ export function readInjected(workspace: string, sessionId: string, dir = '.dsh-m
   return readSeenFile(workspace, sessionId, dir).injected
 }
 
-/** 追加写入已注入 id。 */
+/** 追加写入已注入 id（同时推进「最近注入窗口」）。 */
 export function markInjected(workspace: string, sessionId: string, ids: string[], dir = '.dsh-meow'): void {
   if (ids.length === 0) return
   const seen = readSeenFile(workspace, sessionId, dir)
   const set = new Set(seen.injected)
   for (const id of ids) set.add(id)
   seen.injected = [...set]
+  // 滑窗：新注入的排最后，超出长度丢最旧的。
+  const recent = seen.recentInjected.filter((id) => !ids.includes(id))
+  recent.push(...ids)
+  seen.recentInjected = recent.slice(-MAX_RECENT_INJECTED)
   writeSeenFile(workspace, sessionId, seen, dir)
 }
 
@@ -527,11 +556,21 @@ export function buildReinjection(
   return { text, injectedIds: replayedIds }
 }
 
-/** 关键词命中查询（首轮与每条消息链路共用）：active 的 fact/lesson/rules/topic，
- *  范围=全局 或 当前 project 锚定；排除本会话已见（injected+searched）；
- *  不检索本 session 建立的记忆（它们就在上下文里，AI 最清楚，无需命中）。
+/** 关键词命中查询（首轮与每条消息链路共用）：active 的 fact/lesson/rules/topic。
+ *
+ *  候选池 = 四层全量（只排除「最近注入窗口」内的），跨项目与本会话建立的记忆**降权而非剔除**：
+ *  - 旧实现直接 `source_session !== sessionId` 排除 + 只认当前 project，两者叠加在长会话里
+ *    会把候选池清零（本会话建立的记忆先被排除，剩下的又全在 injected 全集里），实测某
+ *    600 轮会话 808 次判定 0 命中。降权（×0.7）同样能防「复读刚说过的话」，但不会掐断来源。
+ *  - 范围：全局/当前项目为满权，跨项目 ×0.7（长会话里话题会漂移，硬切会丢相关来源）。
+ *
  *  命中打分基于条目关键词（keywords，+title）而非全文——全文匹配噪音大
- *  （常见 bigram 如"的时"每条消息都有，长条目一碰词就整条注入）。 */
+ *  （常见 bigram 如"的时"每条消息都有，长条目一碰词就整条注入）。但仅有词面还不够，
+ *  必须再叠「覆盖率绝对门槛」（hitMinCoverage）：重叠一个词就入榜时，长文档靠通用词
+ *  就能占满 top-K。
+ *
+ *  查询取用户消息全文（上限 MAX_QUERY_CHARS）而不是前 500 字：桥接/别名预设会在真实
+ *  内容前拼大段模板，截断后真实诉求永远进不了匹配面。 */
 function hitQuery(
   db: MemoryDb,
   workspace: string,
@@ -542,30 +581,46 @@ function hitQuery(
 ): Array<{ id: string; level: string; content: string; updated_at: number | null }> {
   const seenState = readSeenFile(workspace, sessionId, dir)
   const currentProject = seenState.currentProject
+  const recent = new Set(seenState.recentInjected)
   const hitRows = [
     ...db.list('fact', { status: 'active' }),
     ...db.list('lesson', { status: 'active' }),
     ...db.list('rules', { status: 'active' }),
     ...db.list('topic', { status: 'active' }),
-  ].filter((r) =>
-    (isGlobalScope(r.project) || (currentProject !== null && projectCovers(r.project, currentProject)))
-    && r.source_session !== sessionId // 本 session 建立的记忆在上下文里，不命中
-    && !seenState.injected.includes(r.id), // 已注入先排除再截断（#67）：先 hitTopK 后过滤，
-  ) // top-K 被旧命中占满时本轮会颗粒无收，注入数恒低于上限
+  ].filter((r) => !recent.has(r.id))
   if (hitRows.length === 0) return []
-  const query = userText.slice(0, 500)
+  const inScope = new Map(
+    hitRows.map((r) => [
+      r.id,
+      isGlobalScope(r.project) || (currentProject !== null && projectCovers(r.project, currentProject)),
+    ]),
+  )
+  const isSelf = new Map(hitRows.map((r) => [r.id, r.source_session === sessionId]))
+  const query = userText.slice(0, MAX_QUERY_CHARS)
   const docs = toDocs(hitRows).map((d) => ({
     ...d,
     // 匹配面 = 条目关键词（LLM 提取或自动 bigram；无关键词的旧条目回退内容前 100 字）。
     content: d.keywords.length > 0 ? d.keywords.join(' ') : d.content.slice(0, 100),
   }))
-  // 命中专用打分：交集×覆盖率×艾宾浩斯(updated_at)×importance×title 加成（艾宾浩斯开着）。
-  const hits = keywordHitScore(query, docs, { k: o.hitTopK })
+  // k 传候选池全量：门槛过滤与降权都在本层做，先截断会丢掉本该进榜的条目。
+  const hits = keywordHitScore(query, docs, { k: hitRows.length })
+  // 覆盖率门槛按条目长度分档：长条目要求命中比例高（防"通用词一碰就整条注入"），
+  // 短条目放宽（分母太小，比例天然偏高/偏低）。hitMinCoverage=0 时整档关闭。
+  // 长度用去重 token 数，与 bm25 里 coverage 的分母保持同一口径。
+  const docLen = new Map(docs.map((d) => [d.id, new Set(tokenize([d.content, d.title ?? ''].join(' ')).filter((t) => t.length >= 2)).size]))
+  const thresholdOf = (id: string): number => {
+    if (o.hitMinCoverage <= 0) return 0
+    const len = docLen.get(id) ?? 0
+    return len > 0 && len <= SHORT_DOC_TOKENS ? Math.min(o.hitMinCoverage, SHORT_DOC_MIN_COVERAGE) : o.hitMinCoverage
+  }
+  const kept = hits.filter((h) => (h.coverage ?? 0) >= thresholdOf(h.id))
   const byId = new Map(hitRows.map((r) => [r.id, r]))
   // 展示/注入用原文 content（docs 的 content 只是 keywords 匹配面，不能当正文）。
-  // 已注入的进入本函数前就排掉了（#67），这里不再二次过滤。
-  return hits
-    .map((h) => {
+  return kept
+    .map((h) => ({ h, weight: (inScope.get(h.id) ? 1 : 0.7) * (isSelf.get(h.id) ? 0.7 : 1) }))
+    .sort((a, b) => b.h.score * b.weight - a.h.score * a.weight)
+    .slice(0, Math.max(0, o.hitTopK))
+    .map(({ h }) => {
       const row = byId.get(h.id)
       return { id: h.id, level: h.level, content: row?.content ?? h.content, project: row?.project ?? null, updated_at: row?.updated_at ?? null }
     })

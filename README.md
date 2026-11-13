@@ -81,6 +81,7 @@ dsh plugin --profile web add github:coutogilson/dsh-meow-memory
     projectDir: '.dsh-meow' # 记忆目录（相对工作区）
     promptLang: 'zh'       # ⚠️ 首次使用建议显式配置（见下方说明）
     hitTopK: 2             # 每条用户消息关键词命中的条目数上限
+    hitMinCoverage: 0.4    # 命中覆盖率门槛（0..1）：记忆关键词有多大比例被消息命中才注入；0=关闭
     dream:
       enabled: true
       idleMinutes: 180     # 窗口空闲 ≥180 分钟（3 小时）允许 dream

@@ -1767,7 +1767,14 @@ db2.insert({ level: 'fact', content: 'femo 专有命中词', project: 'femo', cr
 const hitAnc = buildHitInjection(db2, ws2, 's-anchor', 'femo 专有命中词', { hitTopK: 3 }, '.dsh-meow')
 check('anchored hit includes current project', hitAnc !== null && hitAnc.text.includes('femo 专有命中词'))
 const hitNoAnc = buildHitInjection(db2, ws2, 's-no-anchor', 'femo 专有命中词', { hitTopK: 3 }, '.dsh-meow')
-check('unanchored hit excludes project-only', hitNoAnc === null || !hitNoAnc.text.includes('femo 专有命中词'))
+// 行为变更（v0.33）：跨项目记忆不再硬排除，改为降权 ×0.7。旧语义下「未锚定只认全局」
+// 叠加「排本会话」「排已注入」会在长会话里把候选池清零（实测 808 次判定 0 命中）。
+check('unanchored hit includes project-only (downweighted)', hitNoAnc !== null && hitNoAnc.text.includes('femo 专有命中词'))
+// 降权生效：同内容、同覆盖率时，in-scope（全局/当前项目）必须排在跨项目之前
+db2.insert({ level: 'fact', content: '降权对比：全局条目甲', project: null, keywords: ['降权对比词'] })
+db2.insert({ level: 'fact', content: '降权对比：跨项目条目乙', project: 'other-proj', keywords: ['降权对比词'] })
+const hitW = buildHitInjection(db2, ws2, 's-weight', '降权对比词', { hitTopK: 2 }, '.dsh-meow')
+check('scope downweight keeps in-scope first', hitW !== null && hitW.text.includes('全局条目甲') && hitW.text.includes('跨项目条目乙') && hitW.text.indexOf('全局条目甲') < hitW.text.indexOf('跨项目条目乙'))
 
 // 命中基于 keywords 而非全文：content 含词但 keywords 不含 → 不命中（防噪音）
 const noiseId = db2.insert({ level: 'fact', content: '这段话的全文里出现了测试两个字但关键词是别的', project: null }).id
@@ -1793,10 +1800,11 @@ db2.update('fact', impHigh, { status: 'archived' })
 db2.insert({ level: 'fact', content: '单词聚焦条目', project: null, keywords: ['唯一词'] })
 const hitCover = buildHitInjection(db2, ws2, 's-cover', '唯一词', { hitTopK: 3 }, '.dsh-meow')
 check('coverage favors focused entry', hitCover !== null && hitCover.text.includes('单词聚焦条目') && !hitCover.text.includes('LLM 关键词测试条目'))
-// 不检索本 session 建立的记忆（它们在上下文里，无需命中）
+// 行为变更（v0.33）：本会话建立的记忆不再硬排除，改为降权 ×0.7（内容已在上下文里，
+// 但长会话里它往往正是唯一相关来源；旧语义会把它连同整个候选池一起掐断）。
 const selfId = db2.insert({ level: 'fact', content: '本窗口刚写的独有命中词', project: null, source_session: 's-self' }).id
 const hitSelf = buildHitInjection(db2, ws2, 's-self', '独有命中词', { hitTopK: 3 }, '.dsh-meow')
-check('hit excludes own-session memory', hitSelf === null || !hitSelf.text.includes('本窗口刚写的独有命中词'))
+check('hit includes own-session memory (downweighted)', hitSelf !== null && hitSelf.text.includes('本窗口刚写的独有命中词'))
 db2.update('fact', selfId, { status: 'archived' })
 // 命中条目带记忆时间戳（updated_at 相对时间）
 const datedId = db2.insert({ level: 'fact', content: '带时间戳的命中条目', project: null, updated_at: Date.now() - 2 * 86_400_000 }).id
