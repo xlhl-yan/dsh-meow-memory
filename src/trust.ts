@@ -44,8 +44,20 @@ interface TrustMarker {
 /** 门状态：null = 未启用（测试环境 / apply 前）→ 一切判定 fail-open。 */
 let markersDir: string | null = null
 
-/** 启用信任门（apply 期调用一次；homeDir 参数化供测试隔离）。幂等。 */
-export function enableWorkspaceTrust(homeDir: string = activeHomeDir()): void {
+/** 「默认信任」开关（用户拍板 2026-11-13）：开启后 {@link isTrustedWorkspace} 恒为
+ *  true，整套注册表判定被跳过。
+ *
+ *  动机：注册表按 homeDir 落盘（`<home>/trusted-workspaces/<sha256(路径)>.json`），
+ *  而 homeDir 会随插件目录/全局目录变化。用户换一次插件目录，旧注册表就整个失效，
+ *  所有既有工作区回落到「未信任」——以前的会话看起来"记忆全没了"，只能逐个
+ *  `/meow-trust`。这个代价对自用场景太重，所以默认改成信任（即关掉 #64 的
+ *  预置库防护）。需要防护时把 `trustByDefault` 置 false 即可完全恢复原行为。 */
+let trustAll = false
+
+/** 启用信任门（apply 期调用一次；homeDir 参数化供测试隔离）。幂等。
+ *  @param trustAllWorkspaces true = 默认信任所有工作区（跳过注册表判定）。 */
+export function enableWorkspaceTrust(homeDir: string = activeHomeDir(), trustAllWorkspaces = false): void {
+  trustAll = trustAllWorkspaces
   const dir = join(homeDir, 'trusted-workspaces')
   try {
     mkdirSync(dir, { recursive: true })
@@ -58,6 +70,7 @@ export function enableWorkspaceTrust(homeDir: string = activeHomeDir()): void {
 /** 停用信任门（测试清理用；生产不调用）。 */
 export function disableWorkspaceTrust(): void {
   markersDir = null
+  trustAll = false
 }
 
 function markerPath(ws: string): string {
@@ -83,8 +96,9 @@ function writeMarker(ws: string, marker: TrustMarker): void {
   renameSync(tmp, target)
 }
 
-/** 工作区是否已信任。门未启用时 fail-open 返回 true。 */
+/** 工作区是否已信任。默认信任模式或门未启用时返回 true。 */
 export function isTrustedWorkspace(ws: string): boolean {
+  if (trustAll) return true
   if (markersDir === null) return true
   const marker = readMarker(ws)
   return marker !== undefined && typeof marker.trustedAt === 'number'

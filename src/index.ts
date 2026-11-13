@@ -231,6 +231,11 @@ const config = z.object({
   /** 命中最低覆盖率门槛（0..1）：记忆关键词有多大比例被本轮消息命中才允许注入。
    *  0 = 关闭门槛（旧行为：重叠一个 bigram 就注入，长会话里几乎全是噪声）。 */
   hitMinCoverage: z.number().min(0).max(1).default(0.4),
+  /** 默认信任工作区自带的记忆库（= 关闭 #64 的预置库防护）。
+   *  开启后不再需要 /meow-trust；换插件目录/全局目录也不会丢信任（注册表按 homeDir
+   *  存放，换目录等于旧注册表全部失效，既有工作区会集体回落未信任）。
+   *  默认 true（用户拍板 2026-11-13）。需要防护时置 false 即恢复原行为。 */
+  trustByDefault: z.boolean().default(true),
   /** 导引标题截断长度。 */
   titleMax: z.number().min(10).max(200).default(40),
   /** 是否在 ReAct 任务结束后自动注入反思。 */
@@ -432,6 +437,8 @@ interface ResolvedConfig {
   homeDir: string | undefined
   hitTopK: number
   hitMinCoverage: number
+  /** 默认信任工作区记忆库（关掉 #64 预置库防护）。 */
+  trustByDefault: boolean
   titleMax: number
   reflect: boolean
   reflectTurns: number
@@ -457,6 +464,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     homeDir: typeof c.homeDir === 'string' ? c.homeDir : undefined,
     hitTopK: c.hitTopK ?? 2,
     hitMinCoverage: c.hitMinCoverage ?? 0.4,
+    trustByDefault: c.trustByDefault ?? true,
     titleMax: c.titleMax ?? 40,
     reflect: c.reflect ?? true,
     reflectTurns: c.reflectTurns ?? 7,
@@ -808,7 +816,7 @@ function hotSwitchHomeDir(ctx: Context, config: unknown, get: (() => unknown) | 
           // 信任注册表跟着全局目录走（#64）：新目录重新启用 + 播种。新 home 里没有
           // window-index.json 时播种为空——既有信任以新目录注册表为准（用户主动
           // 迁目录 = 重新建立信任面，与 window-index 同语义）。
-          enableWorkspaceTrust()
+          enableWorkspaceTrust(undefined, resolved.trustByDefault)
           seedTrustedWorkspaces()
         }
       } catch {
@@ -1211,7 +1219,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
   // 零摩擦），再启用门——此后新遇到的「非本机创建 .dsh-meow」一律未信任（注入/
   // 检索/整理/写入全停，判据与登记时机见 src/trust.ts），/meow-trust 恢复。建库
   // 时刻的登记在 getDb（db.ts）；loadWindowIndex 只打开已存在的库、不会误建库。
-  enableWorkspaceTrust()
+  enableWorkspaceTrust(undefined, resolved.trustByDefault)
   const seededTrust = seedTrustedWorkspaces()
   if (seededTrust.listed > 0) {
     ctx.logger.info(`meow-memory: workspace trust gate on (seeded ${seededTrust.trusted}/${seededTrust.listed} from window-index)`)

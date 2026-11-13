@@ -13,7 +13,7 @@
  *
  * 运行：node tests/trust.mjs（npm test 已串入；跑前先 npm run build）
  */
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -132,6 +132,18 @@ try {
   check('命令：首次信任 → success 且生效', r1.kind === 'success' && m.isTrustedWorkspace(wsCmd) === true)
   const r2 = cmd.handler({ agent: { session: { header: { cwd: wsCmd } } } })
   check('命令：重复信任 → success（幂等）', r2.kind === 'success')
+
+  // ── 7. 默认信任模式（trustByDefault，2026-11-13 用户拍板）──────────────
+  // 动机：注册表按 homeDir 落盘，换插件目录后整个注册表失效、既有工作区集体回落
+  // 未信任（旧会话记忆"消失"）。默认信任 = 跳过注册表判定，全部视为可信。
+  const home5 = freshHome()
+  m.enableWorkspaceTrust(home5, true)
+  check('默认信任：任意工作区已信任', m.isTrustedWorkspace(join(home5, 'never-seen')) === true)
+  check('默认信任：预置库工作区也不再未信任', m.isUntrustedMemoryWorkspace(wsPreseed) === false)
+  check('默认信任：不写注册表（注册表目录保持空）', existsSync(join(home5, 'trusted-workspaces')) && readdirSync(join(home5, 'trusted-workspaces')).length === 0)
+  // 关掉即恢复原行为（同 homeDir 下重新启用，不带 trustAll）
+  m.enableWorkspaceTrust(home5, false)
+  check('关闭默认信任：恢复未信任判定', m.isUntrustedMemoryWorkspace(join(home5, 'never-seen')) === true)
 
   m.disableWorkspaceTrust()
   console.log(failed === 0 ? `\ntrust: ${passed} passed` : `\ntrust: ${passed} passed, ${failed} FAILED`)
