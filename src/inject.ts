@@ -21,12 +21,16 @@ export interface InjectOptions {
   hitTopK: number
   /** 导引里 project/topic 标题超长截断长度。 */
   titleMax: number
-  /** 命中最低覆盖率门槛（0..1）：记忆关键词有多大比例被本轮消息命中才允许注入。
-   *  没有门槛时「重叠一个 bigram」就能挤进 top-K，长会话里几乎全是噪声。 */
+  /** 命中最低覆盖率门槛（0..1）：本轮消息被记忆关键词覆盖的比例低于此值就不注入。
+   *  分母取 min(查询 token 数, 记忆 token 数)（见 bm25.keywordHitScore）。
+   *  0 = 关闭门槛。 */
   hitMinCoverage: number
+  /** 命中诊断日志（默认 false）：每次命中判定（含 0 条）都打一行，排查「怎么从来不命中」用。
+   *  不进设置页表单——它是排查工具不是日常开关（需求方拍板 2026-11-13）。 */
+  hitDebug: boolean
 }
 
-const DEFAULT_OPTS: InjectOptions = { hitTopK: 2, titleMax: 40, hitMinCoverage: 0.4 }
+const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 0.15, hitDebug: false }
 
 /** 命中查询的文本上限：从用户消息里取这么多字符做关键词匹配。
  *  旧值是 500——桥接/预设会在真实内容前拼大段说明模板，500 字常常只覆盖到模板，
@@ -37,6 +41,30 @@ const MAX_QUERY_CHARS = 4000
  *  旧语义（整会话 excluded）在长会话里会把候选池清零——本会话写的记忆先被
  *  source_session 排除，剩下的又全在 injected 里，最终没有一条能再被命中。 */
 export const MAX_RECENT_INJECTED = 40
+
+/** 命中诊断日志出口（apply 期由宿主 logger 注入；null = 不输出）。
+ *  与 setMemoryToolGate 同款：模块级注入，避免把 ctx 一路透传到打分链路。 */
+let hitDebugLogger: ((msg: string) => void) | null = null
+
+export function setHitDebugLogger(fn: ((msg: string) => void) | null): void {
+  hitDebugLogger = fn
+}
+
+/** 查询侧停用 bigram（虚词 / 疑问词 / 跨词碎片）：命中了也不代表语义相关。
+ *
+ *  实测（207 条真实记忆）：「今天天气怎么样」唯一命中的是「怎么」，「1 加 1 等于几」只命中
+ *  「等于」，「帮我看看这个文件」命中碎片「个文」——都靠虚词把覆盖率抬到 0.17-0.50，
+ *  把无关记忆注入了进来。更糟的是「甩镜怎么做」真正该命中的「甩镜」反而因为 IDF 低于
+ *  「怎么」排在后面。
+ *
+ *  这里只做「命中侧」过滤（不参与分母统计），代价是真实但不相关的虚词命中不会被算作相关。 */
+const QUERY_STOP_TOKENS = new Set([
+  '怎么', '么做', '么样', '么配', '什么', '为什', '如何', '哪些', '是不', '不是',
+  '这个', '那个', '个文', '一个', '一下', '可以', '应该', '帮我', '我看', '看看',
+  '等于', '现在', '今天', '明天', '昨天', '想要', '需要', '希望', '这样', '那样',
+  '就是', '还是', '但是', '因为', '所以', '如果', '然后', '已经', '没有', '一些',
+  '这里', '那里', '你的', '我的', '他的', '自己',
+])
 
 /** 短条目阈值（token 数）与它的宽松覆盖率门槛：只有寥寥几个关键词的条目（早期无
  *  keywords、回退正文前 100 字的旧数据），覆盖率分母小，按长条目门槛会被一律误伤。
@@ -596,14 +624,19 @@ function hitQuery(
     ]),
   )
   const isSelf = new Map(hitRows.map((r) => [r.id, r.source_session === sessionId]))
-  const query = userText.slice(0, MAX_QUERY_CHARS)
+  // 查询侧先滤掉虚词/碎片 bigram（见 QUERY_STOP_TOKENS）：剩下的才是可能有语义权重的词。
+  // 用空格重新拼接再喂给 keywordHitScore——顺带消掉跨词的 bigram 碎片（「这个文件」的「个文」）。
+  const query = tokenize(userText.slice(0, MAX_QUERY_CHARS))
+    .filter((t) => t.length >= 2 && !QUERY_STOP_TOKENS.has(t))
+    .join(' ')
   const docs = toDocs(hitRows).map((d) => ({
     ...d,
     // 匹配面 = 条目关键词（LLM 提取或自动 bigram；无关键词的旧条目回退内容前 100 字）。
     content: d.keywords.length > 0 ? d.keywords.join(' ') : d.content.slice(0, 100),
   }))
   // k 传候选池全量：门槛过滤与降权都在本层做，先截断会丢掉本该进榜的条目。
-  const hits = keywordHitScore(query, docs, { k: hitRows.length })
+  // maxDfRatio 0.08：过滤掉「在八成以上记忆里都有」的查询词，它们没有区分度。
+  const hits = keywordHitScore(query, docs, { k: hitRows.length, maxDfRatio: 0.08 })
   // 覆盖率门槛按条目长度分档：长条目要求命中比例高（防"通用词一碰就整条注入"），
   // 短条目放宽（分母太小，比例天然偏高/偏低）。hitMinCoverage=0 时整档关闭。
   // 长度用去重 token 数，与 bm25 里 coverage 的分母保持同一口径。
@@ -614,6 +647,17 @@ function hitQuery(
     return len > 0 && len <= SHORT_DOC_TOKENS ? Math.min(o.hitMinCoverage, SHORT_DOC_MIN_COVERAGE) : o.hitMinCoverage
   }
   const kept = hits.filter((h) => (h.coverage ?? 0) >= thresholdOf(h.id))
+  // 命中诊断（需求方要求：没命中也要打，带最高 coverage，否则「怎么从来不命中」只能瞎猜）。
+  if (o.hitDebug && hitDebugLogger !== null) {
+    const qLen = new Set(tokenize(query).filter((t) => t.length >= 2)).size
+    const top = hits.length > 0 ? Math.max(...hits.map((h) => h.coverage ?? 0)) : 0
+    if (kept.length === 0) {
+      hitDebugLogger(`meow-memory: hit: 0 条（最高 coverage=${top.toFixed(2)} < ${o.hitMinCoverage}，query tokens=${qLen}，候选=${hitRows.length}）`)
+    } else {
+      const detail = kept.map((h) => `${h.id.slice(0, 9)}(${(h.coverage ?? 0).toFixed(2)})`).join(', ')
+      hitDebugLogger(`meow-memory: hit: ${kept.length} 条（query tokens=${qLen}，候选=${hitRows.length}） → ${detail}`)
+    }
+  }
   const byId = new Map(hitRows.map((r) => [r.id, r]))
   // 展示/注入用原文 content（docs 的 content 只是 keywords 匹配面，不能当正文）。
   return kept

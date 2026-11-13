@@ -688,7 +688,7 @@ check('check gate passes after interval', dbW.claimCheckGate(0) === true)
   const box = { current: undefined }
   const read = liveConfigReader({ enabled: true }, () => box.current, 0)
   const r1 = read()
-  check('liveConfig: missing source → factory defaults', r1.hitTopK === 2 && r1.dream.enabled === true)
+  check('liveConfig: missing source → factory defaults', r1.hitTopK === 3 && r1.hitMinCoverage === 0.15 && r1.hitDebug === false && r1.dream.enabled === true)
   check('liveConfig: same source → cached identity', read() === r1)
   box.current = { hitTopK: 5 }
   const r2 = read()

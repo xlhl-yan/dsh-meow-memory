@@ -48,7 +48,7 @@ import {
   shortSessionId,
   type DreamConfig,
 } from './dream.js'
-import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, isReinjectPending, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen } from './inject.js'
+import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, isReinjectPending, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen, setHitDebugLogger } from './inject.js'
 import { migrateLegacy } from './migrate.js'
 import { buildReflectMessage, consecutiveToolSteps, PLUGIN_SOURCE, REFLECT_MARKER, scanTurn } from './reflect.js'
 import { isMeowSource } from './source.js'
@@ -226,11 +226,18 @@ const config = z.object({
    *  预设定义）。不进 CONFIG_DEFAULTS——「恢复默认」绝不能把它当字段写进 user 层；
    *  它也不是设置页 FieldSpec，页面与 resolveConfig 都不读它。 */
   homeDirPresets: z.dict(z.string()).default(homeDirPresetsDefault()),
-  /** 关键词命中条数上限（fact/lesson/rules/topic 短条目，每条用户消息命中注入）。 */
-  hitTopK: z.number().min(0).max(10).default(2),
-  /** 命中最低覆盖率门槛（0..1）：记忆关键词有多大比例被本轮消息命中才允许注入。
-   *  0 = 关闭门槛（旧行为：重叠一个 bigram 就注入，长会话里几乎全是噪声）。 */
-  hitMinCoverage: z.number().min(0).max(1).default(0.4),
+  /** 关键词命中条数上限（fact/lesson/rules/topic 短条目，每条用户消息命中注入）。
+   *  默认 3（需求方拍板 2026-11-13）：同一件事相关的记忆往往成组出现，2 条容易漏。 */
+  hitTopK: z.number().min(0).max(10).default(3),
+  /** 命中最低覆盖率门槛（0..1）：本轮消息被记忆关键词覆盖的比例低于此值就不注入。
+   *  分母 = min(查询 token 数, 记忆 token 数)。0 = 关闭门槛。
+   *  默认 0.15（需求方拍板 2026-11-13，原 0.4）：实测三句典型测试话在旧口径下只有
+   *  2.9% / 9.5% / 4.5%，0.4 与 0.2 都命中不了；换分母后 0.15 三句全中。 */
+  hitMinCoverage: z.number().min(0).max(1).default(0.15),
+  /** 命中诊断日志（默认 false）：命中判定无论 0 条还是 N 条都打一行，含命中 id/coverage。
+   *  排查「怎么从来不命中」时打开。⚠️ 这是排查工具不是日常开关，不进设置页表单——
+   *  需求方拍板 2026-11-13；改它请走 cordis.patch.yml 或配置文件。 */
+  hitDebug: z.boolean().default(false),
   /** 默认信任工作区自带的记忆库（= 关闭 #64 的预置库防护）。
    *  开启后不再需要 /meow-trust；换插件目录/全局目录也不会丢信任（注册表按 homeDir
    *  存放，换目录等于旧注册表全部失效，既有工作区会集体回落未信任）。
@@ -441,6 +448,8 @@ interface ResolvedConfig {
   homeDir: string | undefined
   hitTopK: number
   hitMinCoverage: number
+  /** 命中诊断日志开关（默认 false；不进设置页表单）。 */
+  hitDebug: boolean
   /** 默认信任工作区记忆库（关掉 #64 预置库防护）。 */
   trustByDefault: boolean
   /** 命中正文默认截断长度（0=全文）；memory_search / find_similar 共用。 */
@@ -468,8 +477,9 @@ function resolveConfig(config: unknown): ResolvedConfig {
     enabled: c.enabled ?? true,
     projectDir: c.projectDir ?? '.dsh-meow',
     homeDir: typeof c.homeDir === 'string' ? c.homeDir : undefined,
-    hitTopK: c.hitTopK ?? 2,
-    hitMinCoverage: c.hitMinCoverage ?? 0.4,
+    hitTopK: c.hitTopK ?? 3,
+    hitMinCoverage: c.hitMinCoverage ?? 0.15,
+    hitDebug: c.hitDebug ?? false,
     trustByDefault: c.trustByDefault ?? true,
     searchContentMax: c.searchContentMax ?? 400,
     titleMax: c.titleMax ?? 40,
@@ -1244,6 +1254,8 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
   // 否则新 apply 重复注册同名工具会抛异常 → apply 中断 → 工具/手册/pre-step 全失效
   // （真机踩坑 2026-08-17：04:35 配置变更触发的 reload 后首轮注入消失）。
   const toolDisposers: Array<() => void> = []
+  // 命中诊断日志出口（需求方 2026-11-13）：打开后每次命中判定都打一行，含 0 条与最高 coverage。
+  setHitDebugLogger(resolved.hitDebug ? (msg: string) => ctx.logger.info(msg) : null)
   // 记忆门控判定器（issue #38/#28）：工具层经 setMemoryToolGate 读取（活配置闭包）。
   // 写档的整理轮豁免 = isPluginTurn（dream/reflect 指令轮的标记，本文件事件链维护）。
   setMemoryToolGate({
@@ -2205,7 +2217,7 @@ export { parseModelSpec, REFLECT_DELEGATE_MARKER, REFLECT_DONE_DELEGATE_MARKER, 
 export { collectDreamStates, headerOf, type PersistedSessionLike } from './dream-signal.js'
 export { MemoryDb, memoryDbPath, getDb, closeAllDbs, backupMemoryDb, LEVELS, newId, PROJECT_SUBCATEGORIES, projectList, projectCovers, projectLabel, relativeTime, isGlobalProject, isGlobalScope, globalProjectMarker, GLOBAL_PROJECT_CANON, GLOBAL_PROJECT_CANON_EN } from './db.js'
 export { migrateLegacy } from './migrate.js'
-export { buildHitInjection, buildInjection, buildReinjection, buildProjectSectionText, readSeen, markSearched, markAccessed, readInjected, markInjected, markProjectQueried, readProjectQueried, markWritten, readWritten, markReinjectPending, clearReinjectPending, isReinjectPending, MAX_REINJECT_PROJECTS, MAX_REINJECT_WRITTEN, sessionsFile, getCurrentProject, setCurrentProject, releaseSeen } from './inject.js'
+export { buildHitInjection, buildInjection, buildReinjection, buildProjectSectionText, readSeen, markSearched, markAccessed, readInjected, markInjected, markProjectQueried, readProjectQueried, markWritten, readWritten, markReinjectPending, clearReinjectPending, isReinjectPending, MAX_REINJECT_PROJECTS, MAX_REINJECT_WRITTEN, sessionsFile, getCurrentProject, setCurrentProject, releaseSeen, setHitDebugLogger } from './inject.js'
 export { buildReflectMessage, consecutiveToolSteps, scanTurn } from './reflect.js'
 export { tokenize, stemEn, search, findSimilar, topicDrift, recencyWeight } from './bm25.js'
 export { fillTemplate, keyedValue, resolveSlotText, setPromptLang, getPromptLang, DEFAULT_LANG, SLOTS } from './prompt-loader.js'

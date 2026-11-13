@@ -251,6 +251,10 @@ export interface SearchOptions {
   /** 最低覆盖率门槛（0..1，仅 keywordHitScore 生效）：coverage 低于它的候选直接淘汰。
    *  不传 = 旧行为（raw>0 即入榜）。 */
   minCoverage?: number
+  /** 查询词的最大文档频率占比（0..1，仅 keywordHitScore 生效）：出现在超过这个比例的
+   *  文档里的查询词视为无区分度，直接不参与匹配。命中链路用 0.08 挡掉「文件」这类
+   *  在记忆库里遍地都是的词。不传 = 不过滤。 */
+  maxDfRatio?: number
 }
 
 /**
@@ -368,9 +372,20 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
   const idf = (t: string): number =>
     Math.log(1 + (n - (df.get(t) ?? 0) + 0.5) / ((df.get(t) ?? 0) + 0.5))
 
+  // 过滤「在当前记忆库里过于常见」的查询词：它们命中没有区分度。
+  // 实测「帮我看看这个文件」滤掉虚词后只剩「文件」，而「文件」出现在 24/207 条记忆里
+  // （11.6%），命中它会让 24 条记忆全部以 coverage=0.50 挤进候选；「甩镜」只有 2.9%，
+  // 才是真正有指向性的词。默认阈值 8%（只有当调用方显式传 maxDfRatio 才生效）。
+  const maxDf = opts.maxDfRatio === undefined ? Infinity : Math.max(3, Math.floor(n * opts.maxDfRatio))
+  const qEff = [...qTf].filter(([t]) => (df.get(t) ?? 0) <= maxDf)
+  const qTfEff = new Map(qEff)
+  if (qTfEff.size === 0) return []
+  /** 查询侧去重 token 数（已滤掉虚词 / 过于常见的词）：覆盖率分母取它与文档长度的较小者。 */
+  const qLen = qTfEff.size
+
   const raw: number[] = docs.map((_, di) => {
     let s = 0
-    for (const [t, f] of qTf) {
+    for (const [t, f] of qTfEff) {
       if (tf[di].has(t)) s += idf(t) * f
     }
     return s
@@ -381,8 +396,14 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
     if (raw[di] <= 0) continue
     const len = docLens[di]
     let overlap = 0
-    for (const t of qTf.keys()) if (tf[di].has(t)) overlap++
-    const coverage = len > 0 ? overlap / len : 0
+    for (const t of qTfEff.keys()) if (tf[di].has(t)) overlap++
+    // 覆盖率分母取「查询 token 数」与「记忆关键词 token 数」的**较小者**（需求方拍板 2026-11-13）。
+    // 原口径 ÷ 记忆长度：一条记忆 keywords 8-13 个词 → tokenize 后 20-44 token，而用户一句话
+    // 只有 4-6 token，coverage 只能落在 2-9%——任何 ≥0.2 的门槛都过不了（实测「甩镜怎么做」
+    // 最高 2.9%、「qq 消息重复」9.5%）。语义上也不对：该问的是「你这句话有多少被这条记忆
+    // 覆盖」，不是「这条记忆有多少被你念到」；记忆长、查询短是本质特征，两边都合理，错的是公式。
+    const denom = Math.min(qLen, len)
+    const coverage = denom > 0 ? overlap / denom : 0
     if (opts.minCoverage !== undefined && coverage < opts.minCoverage) continue
     let w = 1
     if (now !== null && docs[di].importance < 3 && !(raw[di] >= 0.85 * maxRaw)) {
