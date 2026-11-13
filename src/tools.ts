@@ -357,7 +357,7 @@ function searchTool(dir: string): ToolDefinition {
         status: { type: 'string', description: T('memory_search.param.status') },
         days: { type: 'integer', minimum: 1, maximum: 3650, description: T('memory_search.param.days') },
         k: { type: 'integer', minimum: 1, maximum: 50, default: 10, description: T('memory_search.param.k') },
-        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: 300, description: T('memory_search.param.content_max') },
+        content_max: { type: 'integer', minimum: 0, maximum: 5000, default: 400, description: T('memory_search.param.content_max') },
         explain: { type: 'boolean', default: false, description: T('memory_search.param.explain') },
       },
     },
@@ -399,17 +399,30 @@ function searchTool(dir: string): ToolDefinition {
           },
         },
       },
-      render: (_args, value) => {
+      render: (args, value) => {
         const v = value as { note?: string; hits?: Array<{ id?: string; level?: string; content?: string; keywords?: unknown; project?: string | null; updated_at?: number | null; score?: number; explain?: { bm25?: number; importance?: number; recencyWeight?: number; status?: string } }> }
+        // v0.34.0（用户需求）：render 此前忽略 args，content_max 形同虚设——传 600 也没用。
+        const cmArg = coerceNumber((args as { content_max?: unknown } | undefined)?.content_max)
+        const contentMax = cmArg !== undefined ? Math.max(0, Math.min(5000, Math.round(cmArg))) : 400
         const lines = [String(v.note ?? '')]
         for (const h of v.hits ?? []) {
-          // 检索元数据视图：归属 + id + 相对时间 + 关键词（无关键词回退原文开头）；原文内容不显示。
+          // 检索元数据视图：归属 + id + 相对时间 + 关键词（无关键词回退原文开头）。
           const kw = (Array.isArray(h.keywords) ? h.keywords : []).filter((x): x is string => typeof x === 'string' && x.length > 0)
           const about = kw.length > 0 ? kw.join(', ') : `${String(h.content ?? '').slice(0, 40)}…`
           // 归属显示：'全局'=真全局；null=未标记（可能是数据 bug）；多值 join '/'（如 dsh/femo）。
           const proj = `${projectLabel(h.project)} : ${String(h.level ?? '')}`
           const rel = relativeTime(h.updated_at ?? null)
           lines.push(`[${proj}] [${String(h.id ?? '')}] [${rel}] 关于：${about}`)
+          // v0.34.0：在关键词下面追加正文。此前只给关键词，模型搜到后看不到内容，必须再
+          // memory_read 一次——多一步导致模型倾向于不搜、凭印象办事，记忆写了用不上。
+          // content_max=0 出全文；超长截断并加 … 标记，让模型知道还有更多。
+          const body = String(h.content ?? '')
+          if (body.length > 0) {
+            // content_max=0 = 不截断出全文；>0 = 截断并在末尾加 … 标记。
+            const truncated = contentMax > 0 && body.length > contentMax
+            const text = truncated ? `${body.slice(0, contentMax)}…` : body
+            for (const ln of text.split(/\r?\n/)) lines.push(`  ${ln}`)
+          }
           // explain=true（#51/#79）：分项得分追加一行。宿主把 render 产物作为工具结果
           // content 喂给模型（dsh-tools createSuccessResult）——只进结构化字段不渲染
           // 等于对模型不可见（#79 的报告即因此误判功能缺失）。
@@ -448,7 +461,7 @@ function searchTool(dir: string): ToolDefinition {
       const kRaw = coerceNumber(parsed.k)
       const k = kRaw !== undefined ? Math.max(1, Math.min(50, Math.round(kRaw))) : 10
       const cmRaw = coerceNumber(parsed.content_max)
-      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 300
+      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 400
 
       const levels: Level[] = typeof parsed.level === 'string' && parsed.level.trim()
         ? parsed.level.split(',').map((s) => s.trim()).filter((s): s is Level => (LEVELS as readonly string[]).includes(s))
@@ -575,9 +588,11 @@ function findSimilarTool(dir: string): ToolDefinition {
       },
       render: (_args, value) => {
         const v = value as { hits?: Array<{ id?: string; level?: string; title?: string; content?: string; similarity?: number }> }
+        // v0.34.0：正文长度已由 execute 按 content_max 截断，这里不再二次砍到 80 字
+        // （旧行为让 content_max 形同虚设，与 memory_search 是同一个毛病）。
         return (v.hits ?? []).map((h) => ({
           type: 'text' as const,
-          text: `[${String(h.level ?? '')} ${String(h.id ?? '').slice(0, 12)}] 相似度 ${Number(h.similarity ?? 0).toFixed(3)} ${String(h.title ?? '')} ${String(h.content ?? '').slice(0, 80)}`,
+          text: `[${String(h.level ?? '')} ${String(h.id ?? '').slice(0, 12)}] 相似度 ${Number(h.similarity ?? 0).toFixed(3)} ${String(h.title ?? '')} ${String(h.content ?? '')}`,
         }))
       },
     },
@@ -596,7 +611,7 @@ function findSimilarTool(dir: string): ToolDefinition {
       const kRaw = coerceNumber(parsed.k)
       const k = kRaw !== undefined ? Math.max(1, Math.min(20, Math.round(kRaw))) : 5
       const cmRaw = coerceNumber(parsed.content_max)
-      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 200
+      const contentMax = cmRaw !== undefined ? Math.max(0, Math.min(5000, Math.round(cmRaw))) : 400
 
       const rows = LEVELS.flatMap((lv) => (lv === 'soul' || lv === 'user' ? [] : db.listSearchable(lv)))
       const candidates = rows.filter((r) => r.id !== found.row.id && !seen.has(r.id) && r.source_session !== sessionId)

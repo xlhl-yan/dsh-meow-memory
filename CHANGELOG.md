@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.34.0 (2026-11-13) — memory_search 返回正文（fork 分支）
+
+### 修复：搜索只给关键词，模型必须再 memory_read 一次
+
+- 现象：`memory_search` 每条命中只显示「关于：关键词1, 关键词2…」，一个字正文都没有。
+  模型搜到后看不到内容，得再调 `memory_read`——多一步导致模型倾向于干脆不搜、凭印象办事，
+  记忆写了用不上。
+- 根因有两个，都在 `memory_search` 的 `render`：
+  1. `about` 的逻辑是「有 keywords 就只显示 keywords」，有 keywords 的记忆永远看不到正文；
+  2. `render: (_args, value)` **忽略第一个参数**，所以工具参数里的 `content_max`
+     （默认 300，0=全文）完全没生效——传 600 也没用。
+- 改法：`render` 读 `args.content_max`，在关键词行下面按行缩进追加正文；
+  `content_max=0` 出全文，超长截断并在末尾加 `…` 让模型知道还有更多。
+- 默认 `content_max` 300 → **400**（一条 lesson 通常 400-800 字）。
+- keywords 保留在正文上方，不替换。
+- `memory_find_similar` 是同一个毛病（`render` 忽略 args、正文硬编码砍到 80 字），
+  一并修复：正文长度统一交给 `content_max`（默认 200 → 400）。
+
+### 输出形状
+
+```
+[ai-video : lesson] [0mwcb4ws2-…] [10 小时前] 关于：H3能做甩镜了, 甩镜是步数不够不是能力边界, …
+  2026-11-13 修正：「H3 做不出横向甩镜」这个结论是错的——那是步数不够，不是模型能力边界。
+  …
+```
+
+### 测试
+
+- 新增 6 条 render 用例：正文追加 / keywords 保留 / 默认截断带 `…` / `content_max=0` 全文 /
+  `content_max=10` 精确截断 / 空正文不留空行。653 passed, 0 failed。
+- 真实库验证（`D:\AgentTools\qq-bridge\state\agents`，搜「甩镜 步数」k=3）：
+  默认 1823 字、`content_max=0` 2403 字、`content_max=100` 按 100 截断。
+
 ## v0.33.1 (2026-11-13) — 工作区信任默认开启（fork 分支）
 
 ### 新增：`trustByDefault`（默认 true）

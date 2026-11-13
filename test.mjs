@@ -1394,7 +1394,22 @@ check('search status=archived single filter (#68)', sArch.hits.length >= 1 && sA
   rmSync(wsE, { recursive: true, force: true })
 }
 const searchRender = searchTool.output.render({}, { note: '', hits: [{ level: 'fact', id: '0msum4ifx-bf3a-0000000000000000000000', project: 'dsh', content: 'x', keywords: ['dream', '机制'], updated_at: Date.now() - 2 * 86_400_000 }] })
-check('search shows keywords + relative time, no content', searchRender.some((b) => b.text.includes('[dsh : fact]') && b.text.includes('关于：dream, 机制') && b.text.includes('2 天前') && !b.text.includes('记忆时间戳')))
+check('search shows keywords + relative time', searchRender.some((b) => b.text.includes('[dsh : fact]') && b.text.includes('关于：dream, 机制') && b.text.includes('2 天前') && !b.text.includes('记忆时间戳')))
+// v0.34.0（用户需求）：keywords 下面追加正文。此前只有关键词，模型搜到后看不到内容，
+// 必须再 memory_read 一次——多一步导致模型倾向于不搜、凭印象办事。
+check('search render appends body under keywords', searchRender.some((b) => b.text === '  x'))
+check('search render keeps keywords on its own line (#v0.34 不替换)', searchRender.some((b) => b.text.includes('关于：dream, 机制')))
+// content_max 此前被 render 忽略（第一个参数是 _args），传多少都没用；现在真正生效。
+const longBody = '正'.repeat(600)
+const rDefault = searchTool.output.render({}, { note: '', hits: [{ level: 'fact', id: 'id-d', project: 'dsh', content: longBody, keywords: ['kw'] }] })
+const rDefaultText = rDefault.map((b) => b.text).join('\n')
+check('search render truncates long body with ellipsis', rDefaultText.includes('…') && !rDefaultText.includes(longBody))
+const rFull = searchTool.output.render({ content_max: 0 }, { note: '', hits: [{ level: 'fact', id: 'id-f', project: 'dsh', content: longBody, keywords: ['kw'] }] })
+check('search render content_max=0 returns full body', rFull.map((b) => b.text).join('\n').includes(longBody))
+const rShort = searchTool.output.render({ content_max: 10 }, { note: '', hits: [{ level: 'fact', id: 'id-s', project: 'dsh', content: '一二三四五六七八九十十一十二', keywords: ['kw'] }] })
+check('search render honors content_max=10', rShort.map((b) => b.text).join('\n').includes('一二三四五六七八九十…'))
+const rEmpty = searchTool.output.render({}, { note: '', hits: [{ level: 'fact', id: 'id-e', project: 'dsh', content: '', keywords: ['仅关键词'] }] })
+check('search render skips empty body (no stray indented line)', !rEmpty.some((b) => b.text === '  '))
 
 // search 5+5 分段（用户拍板 2026-08-19）：前 5 条无脑取（不排除已见/本 session 建立的），
 // 第 6 名起绕开已见（injected+searched）补齐。分数相同时排名稳定=插入序。
