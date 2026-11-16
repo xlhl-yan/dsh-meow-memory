@@ -70,7 +70,7 @@ export const HYBRID_W_VEC = 0.55
  *  （cov 0.5 + sim 0.6 → 0.594）绰绰有余。 */
 export const HYBRID_MIN_SCORE = 0.40
 /** 纯向量候选（词面完全没撞上）的最低余弦：低于它认为只是泛泛相关。 */
-export const HYBRID_VEC_MIN_SIM = 0.55
+export const HYBRID_VEC_MIN_SIM = 0.45
 /** 查询向量是否参与召回（关掉即退回 v0.40 的纯词面行为）。 */
 export const HYBRID_ENABLED_DEFAULT = true
 
@@ -723,7 +723,9 @@ function hitQuery(
   // 否则「字面不重合但语义很近」的条目会被 hc>=2 一票否决，向量就白算了。
   let vecSim: Map<string, number> | null = null
   if (queryVec !== null && o.hybrid !== false && !embeddingUnavailable()) {
-    const stored = db.loadEmbeddings(embeddingModelId())
+    // 传 queryVec.length 做维度校验：错配时 loadEmbeddings 返回空 Map（并打警告），
+    // 于是自动落到纯词面，而不是拿一批维度不符的向量算出全 0 的余弦。
+    const stored = db.loadEmbeddings(embeddingModelId(), queryVec.length)
     if (stored.size > 0) {
       vecSim = new Map()
       for (const [id, v] of stored) vecSim.set(id, cosine(queryVec, v))

@@ -360,10 +360,26 @@ export class MemoryDb {
 
   // ── v0.41.0 语义向量（混合召回）────────────────────────────────────────────
 
-  /** 读取某个模型下的全部向量（id → Float32Array）。库很大时也只解一次，调用方可缓存。 */
-  loadEmbeddings(model: string): Map<string, Float32Array> {
+  /** 读取某个模型下的全部向量（id → Float32Array）。库很大时也只解一次，调用方可缓存。
+   *
+   *  @param expectDim 期望维度（查询向量的长度）。**给了就严格校验**：维度不符的条目整份丢弃，
+   *  返回空 Map 并记一条警告。理由是维度错配**不会抛错**——`cosine()` 见长度不等直接返回 0，
+   *  于是向量通道悄无声息地失效，只剩词面在跑，表现和「向量没生效」完全一样却查不出原因。
+   *  实测踩过两次：诊断脚本写死旧模型名、换模型后忘重算向量。 */
+  loadEmbeddings(model: string, expectDim?: number): Map<string, Float32Array> {
     const out = new Map<string, Float32Array>()
     const rows = this.db.prepare('SELECT id, dim, vec FROM embeddings WHERE model = ?').all(model) as Array<{ id: string; dim: number; vec: Uint8Array }>
+    if (expectDim !== undefined) {
+      const bad = rows.filter((r) => r.dim !== expectDim)
+      if (bad.length > 0) {
+        // 整份不可信：一部分维度对不上说明这批向量不是当前模型算的，混用等于随机噪声。
+        console.warn(
+          `meow-memory: 向量维度不匹配（期望 ${expectDim}，${bad.length}/${rows.length} 条不符，模型 ${model}）` +
+          '——已跳过向量通道，只走词面。请重跑 scripts/migrate-embeddings.mjs --force。',
+        )
+        return out
+      }
+    }
     for (const r of rows) {
       const buf = r.vec
       // 必须按字节偏移复制：node:sqlite 给的 Buffer 可能带 byteOffset，直接 new Float32Array(buf.buffer) 会读错位。
