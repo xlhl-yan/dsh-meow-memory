@@ -13,7 +13,7 @@ If you find topics in a mess — the cause of something in topic A, its outcome 
 4. Are several topics really describing the same thing and in need of merging? Merge them.
 5. Are several topics tangled together, so that the clean split only comes from merging their information and re-dividing it? Rewrite them.
 6. When you update a topic, think backwards again: "what information am I writing this topic to provide? Will someone reading it understand how this thread actually developed?"
-7. Whenever you write or change a topic, summarize its keywords too (8-13 content words for retrieval; "which words should make the AI see this memory when the user mentions them?").
+7. Whenever you write or change a topic, summarize its keywords too (2-6 concept tags, each <=6 chars, nouns or proper nouns only; no full sentences, no user quotes — retrieval matches by bigram slices, so long phrases shatter into fragments; "which words should make the AI see this memory when the user mentions them?").
 8. Record the project (a project name, or global) and the importance.
 9. For a topic you consider very important, if you are unsure what the truth is, go read the project's files and check. Only for memories that really matter.
 10. Important: check these topics for anything out of date, overturned, proven wrong, or misleading — archive it (status=archived) or rewrite it (prefer archiving). Never leave that active. And don't inflate importance: ordinary progress on a thread is 1, at most 2; only something serious deserves 3.

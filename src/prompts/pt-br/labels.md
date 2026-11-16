@@ -46,6 +46,6 @@
 - reflect.noProjects: (nenhum ainda)
 - remember.error.content: memory_remember: content é obrigatório — acrescente o que você quer lembrar e tente de novo
 - remember.error.project: memory_remember: project é obrigatório — use "{global}" para informações aplicáveis globalmente, ou o nome do projeto (separe vários projetos por vírgula) — acrescente e tente de novo
-- remember.error.keywords: memory_remember: keywords é obrigatório — dê de 8 a 13 palavras-chave de conteúdo para a recuperação (não use o nome do projeto como palavra-chave) — acrescente-as e tente de novo
+- remember.error.keywords: memory_remember: keywords é obrigatório — dê 2-6 etiquetas conceituais (cada uma com <=6 caracteres, apenas substantivos ou nomes próprios; sem frases completas, sem citações do usuário, não use o nome do projeto) — acrescente-as e tente de novo
 - remember.error.keywordsEmpty: memory_remember: keywords chegou, mas não deu para extrair nenhuma palavra-chave dele (recebido {received}) — passe um array de strings, ou o texto das palavras-chave separadas por vírgula, e tente de novo
 - remember.error.importance: memory_remember: importance é obrigatório — avalie: 4=linha vermelha fatal / saúde e segurança, 3=enfatizado pelo usuário / aplicável globalmente, 2=uma decisão do usuário ou uma conclusão abstrata, 1=trivialidade — acrescente e tente de novo

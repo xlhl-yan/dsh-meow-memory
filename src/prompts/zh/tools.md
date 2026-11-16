@@ -11,7 +11,7 @@
 - memory_remember.param.goal: 话题目标句（level=topic 建议填，如"让 femGen 集成可用"）。
 - memory_remember.param.importance: 重要性（数字即可，不设上限；软引导 1-4：4=致命红线/健康安全，3=用户强调/全局适用，2=用户决策抽象总结，1=琐碎）。
 - memory_remember.param.corrected: 是否为用户纠正的内容（level=lesson 时）。
-- memory_remember.param.keywords: 手动指定关键词（反思/dream 轮要求提取 8-13 个内容词；不传则自动 bigram 提取）。
+- memory_remember.param.keywords: 手动指定关键词。**写成 2-6 个「概念标签」，每个 ≤6 字，只用名词/专有名词**——不要写整句、不要抄用户原话、不要「怎么/为什么/在哪」开头。正例：`AutoDL` `租GPU` `显存` `转场` `queryVec`；反例：`AutoDL只有Wan2.1 1.3B`（太长）、`要重跑只能租GPU`（是句子）、`甩镜怎么做`（用户原话）。检索靠 bigram 切片匹配，长句切出来全是碎片。不传则自动 bigram 提取。
 - memory_remember.out.keywords: 实际存储的关键词（自动提取；合并后为最新值）。
 - memory_remember.out.project: 实际归属项目（若有）。
 

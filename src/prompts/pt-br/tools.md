@@ -11,7 +11,7 @@
 - memory_remember.param.goal: A frase de objetivo do topic (recomendada quando level=topic, ex.: "fazer a integração do femGen funcionar").
 - memory_remember.param.importance: Importância (qualquer número, sem limite superior; orientação suave 1-4: 4=linha vermelha fatal / saúde e segurança, 3=enfatizado pelo usuário / aplicável globalmente, 2=uma decisão do usuário ou uma conclusão abstrata, 1=trivialidade).
 - memory_remember.param.corrected: Se isto é algo que o usuário corrigiu (para level=lesson).
-- memory_remember.param.keywords: Palavras-chave que você escolhe (as rodadas de reflection/dream pedem de 8 a 13 palavras de conteúdo; omita e elas são extraídas automaticamente).
+- memory_remember.param.keywords: Palavras-chave que você escolhe. **Escreva 2-6 etiquetas conceituais, cada uma com ≤6 caracteres, apenas substantivos ou nomes próprios** — sem frases completas, sem citações do usuário, sem aberturas "como/por que/onde". Bom: `AutoDL` `alugarGPU` `VRAM` `transição` `queryVec`. Ruim: `AutoDLsóTemWan2.1 1.3B` (longo demais), `paraRodarDeNovoSoAlugaGPU` (é uma frase), `comoFazerWhipPan` (citação do usuário). A recuperação casa por fatias de bigram — frases longas viram fragmentos. Omita e elas são extraídas automaticamente.
 - memory_remember.out.keywords: As palavras-chave realmente armazenadas (extraídas automaticamente; após uma mesclagem, o valor mais recente).
 - memory_remember.out.project: O projeto realmente registrado (se houver).
 

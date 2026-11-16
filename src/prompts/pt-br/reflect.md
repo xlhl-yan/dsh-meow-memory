@@ -21,7 +21,7 @@ Reveja seu histórico de conversa.
 [3] Requisitos gerais ao escrever memórias
 1. As regras para escrever memórias estão no system prompt. Coloque cada memória no level certo e sob o rótulo certo.
 2. Vale repetir, o critério para palavras-chave:
-- Extraia de 8 a 13 palavras-chave para a recuperação
+- Extraia 2-6 etiquetas conceituais para a recuperação (cada uma com <=6 caracteres, apenas substantivos ou nomes próprios; sem frases completas)
 - Pense ao contrário: "quais palavras no prompt de um usuário deveriam fazer esta memória aparecer?"
 - Não o nome do projeto — detalhes específicos da própria memória.
 - Prefira entidades centrais, o centro semântico, nomes próprios.

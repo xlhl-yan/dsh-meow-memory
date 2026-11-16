@@ -46,6 +46,6 @@
 - reflect.noProjects: (none yet)
 - remember.error.content: memory_remember: content is required — add what you want remembered and try again
 - remember.error.project: memory_remember: project is required — use "{global}" for globally applicable information, or the project name (comma-separate several projects) — add it and try again
-- remember.error.keywords: memory_remember: keywords is required — give 8-13 content keywords for retrieval (don't use the project name as a keyword) — add them and try again
+- remember.error.keywords: memory_remember: keywords is required — give 2-6 concept tags (each <=6 chars, nouns or proper nouns only; no full sentences, no user quotes, don't use the project name as a keyword) — add them and try again
 - remember.error.keywordsEmpty: memory_remember: keywords arrived but no keyword could be parsed out of it (received {received}) — pass a string array, or comma-separated text, and try again
 - remember.error.importance: memory_remember: importance is required — rate it: 4=fatal red line / health and safety, 3=stressed by the user / globally applicable, 2=a user decision or abstract conclusion, 1=trivia — add it and try again

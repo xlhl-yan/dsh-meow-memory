@@ -1238,7 +1238,7 @@ const txt = msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
 check('reflect message sections', txt.includes('记忆反思任务') && txt.includes('【一】') && txt.includes('【二】') && txt.includes('【三】'))
 check('reflect update rules', txt.includes('信息已经过时') && txt.includes('标 stale') && txt.includes('关键词不准'))
 check('reflect project list + new project check', txt.includes('已有的 project') && txt.includes('请添加新 project 的记忆'))
-check('reflect keywords 8-13 + guidance', txt.includes('8-13') && txt.includes('反向思考') && txt.includes('level和标签'))
+check('reflect keywords 2-6 concept tags + guidance', txt.includes('2-6') && txt.includes('反向思考') && txt.includes('level和标签'))
 check('reflect no topic rules (topic moved to dream)', !txt.includes('目标句') && !txt.includes('相关话题底稿') && !txt.includes('宽泛名'))
 
 // 空库 → 注入 null

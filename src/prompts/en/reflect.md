@@ -21,7 +21,7 @@ Look back over your chat history.
 [3] General requirements when writing memories
 1. The rules for writing memories are in the system prompt. Put each memory at the right level and under the right label.
 2. Worth repeating, the standard for keywords:
-- Extract 8-13 keywords for retrieval
+- Extract 2-6 concept tags for retrieval (each <=6 chars, nouns or proper nouns only; no full sentences)
 - Think backwards: "which words in a user prompt should make this memory surface?"
 - Not the project name — details specific to the memory itself.
 - Prefer core entities, the semantic center, proper nouns.

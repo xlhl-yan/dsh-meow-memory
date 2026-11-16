@@ -11,7 +11,7 @@
 - memory_remember.param.goal: The topic's goal sentence (recommended when level=topic, e.g. "get the femGen integration working").
 - memory_remember.param.importance: Importance (any number, no upper bound; soft guide 1-4: 4=fatal red line / health and safety, 3=stressed by the user / globally applicable, 2=a user decision or an abstract conclusion, 1=trivia).
 - memory_remember.param.corrected: Whether this is something the user corrected (for level=lesson).
-- memory_remember.param.keywords: Keywords you choose (the reflection/dream rounds ask for 8-13 content words; omit it and they are extracted automatically).
+- memory_remember.param.keywords: Keywords you choose. **Write 2-6 concept tags, each ≤6 characters, nouns or proper nouns only** — no full sentences, no user quotes, no "how/why/where" openers. Good: `AutoDL` `rentGpu` `VRAM` `transition` `queryVec`. Bad: `AutoDLonlyHasWan2.1 1.3B` (too long), `toRerunYouCanOnlyRentGpu` (a sentence), `howToDoWhipPan` (user quote). Retrieval matches by bigram slices — long phrases shatter into fragments. Omit it and they are extracted automatically.
 - memory_remember.out.keywords: The keywords actually stored (auto-extracted; after a merge, the latest value).
 - memory_remember.out.project: The project actually recorded (if any).
 
