@@ -1935,6 +1935,43 @@ check('first user message remains pristine', decisionA.messages[1].source.kind =
   decisionA.messages[1].content.length === 1 && decisionA.messages[1].content[0].text === '你好')
 check('snapshot has no legacy prompt separator', !decisionA.messages[0].content[0].text.includes('本轮用户prompt：'))
 
+// ── v0.38.0 wait 注入：QQ 通道用 qq_wait_for_messages 长轮询收消息，不产生新 turn，
+//    消息只存在于 tool/result 里。pre-step 的工具轮分支要能接住它补一次注入。 ──
+{
+  const wsW = mkdtempSync(join(tmpdir(), 'mm-wait-'))
+  const dbW = getDb(wsW, '.dsh-meow')
+  dbW.insert({ level: 'fact', content: '甩镜怎么做：4 步 turbo 做不出来，20 步 res_multistep 才有', project: 'dsh', keywords: ['甩镜', '步数', '转场'] })
+  const mkAgent = (id, events) => ({ session: { header: { cwd: wsW, id }, events }, steer: () => {} })
+  const toolRound = (agent) => preStep(
+    { agent, messages: [], turn: 1, step: 2, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [] }),
+  )
+  const waitEvents = (callId, name, text) => [
+    { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call', id: callId, name }] } } },
+    { type: 'tool/result', data: { message: { role: 'tool', toolCallId: callId, source: { kind: 'tool', callId }, content: [{ type: 'text', text }] } } },
+  ]
+
+  const agentW = mkAgent('wait-s1', waitEvents('c1', 'qq_wait_for_messages', '{"timeout":false,"newMessages":[{"text":"甩镜 步数不够吗"}]}'))
+  const decW = await toolRound(agentW)
+  check('wait 轮：拿到消息后注入命中记忆', decW.messages.length === 1 &&
+    decW.messages[0].source.kind === 'plugin:meow-memory' && decW.messages[0].content[0].text.includes('甩镜'))
+
+  const decW2 = await toolRound(agentW)
+  check('wait 轮：同一个 callId 不重复注入', decW2.messages.length === 0)
+
+  const agentT = mkAgent('wait-s2', waitEvents('c2', 'mcp__snowluma__qq_wait_for_messages', '{"timeout": true}'))
+  check('wait 轮：超时（没消息）不注入', (await toolRound(agentT)).messages.length === 0)
+
+  const agentO = mkAgent('wait-s3', waitEvents('c3', 'qq_send_message', '{"ok":true}'))
+  check('wait 轮：其它工具不触发', (await toolRound(agentO)).messages.length === 0)
+
+  const agentN = mkAgent('wait-s4', [])
+  check('wait 轮：没有工具结果不触发', (await toolRound(agentN)).messages.length === 0)
+
+  closeAllDbs()
+  rmSync(wsW, { recursive: true, force: true })
+}
+
 // ── #64 外部记忆库信任门：pre-step 分支（未信任 → 一次性提示 + 全部注入暂停）──
 {
   // 预置库形态：.dsh-meow/ 里带一个不是本机建的 memory.db（空文件即可——判定只看

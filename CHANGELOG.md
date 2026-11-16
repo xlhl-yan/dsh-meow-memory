@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.38.0 (2026-11-16) — wait 轮也能注入（fork 分支）
+
+需求：`D:\AgentWorkspace\meow-memory-wait注入需求.md`（第四批）。
+命中质量已达标（用户实测：正 15/15、负 0/15、全量自命中 93.6%），这一批解决**什么时候跑**。
+
+### 根因：不是没有 hook，是早 return 了
+
+需求文档推测「pre-step 只在新 turn 开始时跑」。**实测不是**——agent-loop 里：
+
+```js
+while (true) {
+  const step = phase.step + 1
+  const decision = await this.preStep(target, { turn, step })   // ← 每个 step 都 dispatch
+```
+
+hook 点是现成的。真正的问题在 meow-memory 自己的两个早退：
+
+```js
+if (decision.messages.length === 0) return decision            // ①
+if (userMsgs.length === 0) return decision                     // ②工具轮直接跳过
+```
+
+QQ 通道用 `qq_wait_for_messages` 长轮询收消息，那条消息只存在于 `tool/result` 里、
+不在 `decision.messages` 中，也不产生新 turn —— 所以走到 ② 就被跳过了。
+
+### 改法
+
+在 ② 之前加一个分支：最近一步是 wait 工具且拿到新消息时，用消息文本补跑一次命中，
+结果追加到 `decision.messages` 末尾（工具轮没有 user 消息可前插）。
+
+- **不动 `dsh-qq-companion`**（硬约束 1）✓
+- **不动注入格式**（`inject.hitHeader` + 条目格式）✓
+- **不动命中算法**（`hitQuery` / `keywordHitScore` 一行未改）✓
+- 超时/空结果不注入；同一 `callId` 只处理一次（防一轮注两次）。
+
+从 `tool/result` 里取文本时只提取 `newMessages[].text`，不把 JSON 键名当查询词。
+只回看最近 50 条事件，长会话无 tool/result 的纯文本轮不白扫。
+
+### 顺带修复：`hitDebug` 在注入链上不生效
+
+需求文档指出的 bug：pre-step 的 `buildHitInjection` 调用处只传了 `hitTopK` / `titleMax`，
+`hitDebug` 没传 —— 所以配置里开了也打不出详细日志。已补上（连同 `hitMinCoverage`）。
+
+### 测试
+
+新增 5 条：wait 拿到消息后注入命中记忆 / 同一 callId 不重复 / 超时不注入 /
+其它工具不触发 / 没有工具结果不触发。全套 **658 + 11 + 32 + 69 + 71 + 24 + 31**，零失败。
+
+### 已知限制
+
+- wait 轮同样受 `hc>=2` 约束：单关键词的中文消息（如「甩镜怎么做」过滤后只剩「甩镜」）
+  不会命中 —— 与正常用户消息一致，不是 wait 特有。
+- `markInjected` 仍是 40 条按条数（未改时间制）。
+
 ## v0.37.0 (2026-11-16) — 注入质量：IDF 加权 + 最少命中数（fork 分支）
 
 需求：`D:\AgentWorkspace\meow-memory-注入质量需求.md`（第三批）。

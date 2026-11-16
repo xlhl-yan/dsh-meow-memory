@@ -1488,11 +1488,83 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     }
   })
 
+  // v0.38.0：qq_wait_for_messages 的结果去重（同一个 callId 只处理一次，防同一轮注入两次）。
+  const handledWaitCalls = new Set<string>()
+
+  /**
+   * 取「最近一步的 qq_wait_for_messages 结果」里的消息文本。
+   *
+   * QQ 通道用长轮询收消息：用户发下一句 → wait 返回 → agent 在**同一个 turn** 里继续跑，
+   * 不产生新 turn。这条消息只存在于 tool/result 里、不在 decision.messages 中，所以
+   * pre-step 的工具轮分支拿不到它——这正是「wait 收到了消息却没有注入」的原因。
+   *
+   * 返回 null：最近一步不是 wait / 这个 callId 已处理过 / 超时无消息。
+   */
+  const takeWaitToolText = (agent: any, sid: string): string | null => {
+    try {
+      const events = sessionEventsOf(agent?.session)
+      // 只回看最近 50 条：wait 的结果必然在尾部（它就是刚刚那一步），而长会话的 events
+      // 可能有几万条——无 tool/result 的纯文本轮全量扫一遍会白花时间。
+      const start = Math.max(0, events.length - 50)
+      for (let i = events.length - 1; i >= start; i--) {
+        const e = events[i] as { type?: string; data?: { message?: { toolCallId?: string; source?: { callId?: string }; content?: Array<{ type?: string; text?: string }> } } }
+        if (e?.type !== 'tool/result') continue
+        const msg = e.data?.message
+        const callId = String(msg?.toolCallId ?? msg?.source?.callId ?? '')
+        // tool/result 里只有 callId 没有工具名，回找配对的 tool-call
+        let name: string | undefined
+        for (let j = i - 1; j >= 0; j--) {
+          const ev = events[j] as { type?: string; data?: { message?: { content?: Array<{ type?: string; id?: string; callId?: string; name?: string }> } } }
+          if (ev?.type !== 'assistant/message') continue
+          for (const b of ev.data?.message?.content ?? []) {
+            if (b.type !== 'tool-call') continue
+            const id = String(b.id ?? b.callId ?? '')
+            if (callId === '' || id === callId) { if (b.name !== undefined) name = b.name }
+          }
+          if (name !== undefined) break
+        }
+        // 最近一个 tool/result 不是 wait：现在不是「wait 刚拿到消息」的那一刻，
+        // 不能拿更早的 wait 结果重复注入（否则每个工具轮都会再注一次）。
+        if (name === undefined || !name.endsWith('qq_wait_for_messages')) return null
+        const key = `${sid}:${callId}`
+        if (handledWaitCalls.has(key)) return null
+        const text = (msg?.content ?? [])
+          .filter((b) => b.type === 'text' && typeof b.text === 'string')
+          .map((b) => b.text ?? '')
+          .join('\n')
+        // 超时（没等到消息）/ 空结果：没有可匹配的文本，按要求不注入
+        if (text.length === 0 || /"timeout"\s*:\s*true/.test(text)) return null
+        handledWaitCalls.add(key)
+        if (handledWaitCalls.size > 500) handledWaitCalls.clear() // 进程级上限，防长跑泄漏
+        // 结果通常是 JSON：只取消息正文，别把 timeout/callId 这些键名当查询词
+        try {
+          const parsed = JSON.parse(text) as { newMessages?: unknown; messages?: unknown }
+          const arr = parsed.newMessages ?? parsed.messages
+          if (Array.isArray(arr)) {
+            const joined = arr
+              .map((m) => {
+                const o = m as { text?: unknown; content?: unknown }
+                if (typeof o?.text === 'string') return o.text
+                if (typeof o?.content === 'string') return o.content
+                return ''
+              })
+              .filter((s) => s.length > 0)
+              .join('\n')
+            if (joined.length > 0) return joined
+          }
+        } catch { /* 非 JSON：按原文用 */ }
+        return text
+      }
+    } catch { /* fail-open：拿不到就当没有 wait 结果 */ }
+    return null
+  }
+
   // decision 形状来自宿主事件映射，这里透传不重塑（内部只做 kind/messages 只读访问）。
   const preStepInject = async ({ agent, signal }: { agent: any; signal: { aborted: boolean } }, decision: any): Promise<unknown> => {
     const t0 = Date.now()
     if (decision === undefined || decision.kind !== 'enter' || signal.aborted) return decision
-    if (decision.messages.length === 0) return decision
+    // 空消息列表通常可以直接放行；但 v0.38.0 起 QQ 的 wait 轮可能一条消息都没有
+    // （工具结果不进 decision.messages），那种情况要靠下面的 wait 分支补注入，所以不能在这里 return。
     // 子代理不注入（origin === 'subagent'，dsh 权威标记）：它们的 prompt 由父代理提供
     // （如 dsh-femo 的角色上下文）。注意不能只看 parentSession——GUI fork/续写的
     // 主会话也有 parentSession（真机踩坑 2026-08-17：fca10feb 被误判为子代理导致注入全失效）。
@@ -1503,6 +1575,36 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
 
     // 真实用户消息（跳过插件通知等，source.kind='plugin' 的进不来）。
     const userMsgs = decision.messages.filter((m: { source?: { kind?: string } }) => m.source?.kind === 'user')
+
+    // v0.38.0（用户需求）：QQ 通道用 qq_wait_for_messages 长轮询收消息 —— 那不是新的 user
+    // 消息、也不产生新 turn，所以这一轮走到这里时 userMsgs 为空，原本直接 return、从不注入。
+    // 这里先接住：最近一步是 wait 且拿到了新消息，就用消息文本补跑一次命中链路。
+    // （上面两处 return 必须让路——preStep 在 agent-loop 的 while 循环里每 step 都 dispatch，
+    //  hook 点本身是现成的，缺的只是这个分支。）
+    if (ws !== null && userMsgs.length === 0) {
+      const waitText = takeWaitToolText(agent, sid)
+      if (waitText === null) return decision // 不是 wait 轮：保持原行为（工具轮不注入）
+      try {
+        const db = getDb(ws, resolved.projectDir)
+        const hit = buildHitInjection(db, ws, sid, waitText, {
+          hitTopK: resolved.hitTopK,
+          titleMax: resolved.titleMax,
+          hitMinCoverage: resolved.hitMinCoverage,
+          hitDebug: resolved.hitDebug,
+        }, resolved.projectDir)
+        try {
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
+        } catch { /* 日志失败不阻塞 */ }
+        if (hit !== null) {
+          // 工具轮没有 user 消息可前插，追加到末尾（下一步模型请求就能看到）。
+          const rewritten = [...decision.messages, createMemorySnapshotMessage(hit.text, { kind: 'hit', ids: hit.injectedIds })]
+          return { ...decision, messages: rewritten }
+        }
+      } catch (e) {
+        try { ctx.logger.warn(`meow-memory: wait 轮注入失败（fail-open）: ${e instanceof Error ? e.message : String(e)}`) } catch { /* 日志失败不阻塞 */ }
+      }
+      return decision
+    }
     if (userMsgs.length === 0) return decision // 工具轮/纯插件消息：不注入
 
     // 外部记忆库信任门（#64）：.dsh-meow 非本机创建且未信任 → 全部记忆路径暂停
@@ -1636,22 +1738,35 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     // 命中 id 记入已见，不再重复。
     if (ws) {
       const lastUser = [...decision.messages].reverse().find((m: { source?: { kind?: string } }) => m.source?.kind === 'user')
-      if (lastUser !== undefined) {
-        const text = lastUser.content
+      // v0.38.0（用户需求）：QQ 通道用 qq_wait_for_messages 长轮询收消息——那不是新的 user
+      // 消息、也不产生新 turn，所以工具轮里 pre-step 原本直接跳过、没有注入。这里把它接上：
+      // 最近一步是 wait 且拿到了新消息，就用消息文本补跑一次命中链路。
+      // （hook 点不需要新增：preStep 在 agent-loop 的 while 循环里每个 step 都会 dispatch，
+      //  只是旧代码在「无 user 消息」时提前 return 了。）
+      const userText = lastUser === undefined
+        ? null
+        : lastUser.content
           .filter((b: { type?: string; text?: string }) => b.type === 'text' && typeof b.text === 'string')
           .map((b: { text?: string }) => b.text ?? '')
           .join(' ')
+      const waitText = userText === null ? takeWaitToolText(agent, sid) : null
+      const hitText = userText ?? waitText
+      if (hitText !== null) {
         const db = getDb(ws, resolved.projectDir)
-        const hit = buildHitInjection(db, ws, sid, text, {
+        const hit = buildHitInjection(db, ws, sid, hitText, {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
+          hitMinCoverage: resolved.hitMinCoverage,
+          hitDebug: resolved.hitDebug,
         }, resolved.projectDir)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} textLen=${text.length} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           const rewritten = [...decision.messages]
-          rewritten.splice(rewritten.indexOf(lastUser), 0, createMemorySnapshotMessage(hit.text, { kind: 'hit', ids: hit.injectedIds }))
+          // wait 轮没有 user 消息可前插，追加到末尾（下一步模型请求就能看到）。
+          const at = lastUser !== undefined ? rewritten.indexOf(lastUser) : rewritten.length
+          rewritten.splice(at, 0, createMemorySnapshotMessage(hit.text, { kind: 'hit', ids: hit.injectedIds }))
           return { ...decision, messages: rewritten }
         }
       }
