@@ -391,8 +391,13 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
   // 过滤「在当前记忆库里过于常见」的查询词：它们命中没有区分度。
   // 实测「帮我看看这个文件」滤掉虚词后只剩「文件」，而「文件」出现在 24/207 条记忆里
   // （11.6%），命中它会让 24 条记忆全部以 coverage=0.50 挤进候选；「甩镜」只有 2.9%，
-  // 才是真正有指向性的词。默认阈值 8%（只有当调用方显式传 maxDfRatio 才生效）。
-  const maxDf = opts.maxDfRatio === undefined ? Infinity : Math.max(2, Math.floor(n * opts.maxDfRatio))
+  // 才是真正有指向性的词。
+  //
+  // v0.40.0：绝对下限从 2 提到 8。小库上 5% 会小于 8，导致主题词被误杀——
+  // 实测库只有 45 条时 maxDf=2，把「记忆」(df=5)、「插件」(4) 全过滤掉，只剩
+  // 「个记」「忆插」这种跨词碎片当有效词，于是「这个记忆插件…」撞出一堆无关记忆。
+  // 大库不受影响（238 条时 5%=11 > 8，取 11）。
+  const maxDf = opts.maxDfRatio === undefined ? Infinity : Math.max(8, Math.floor(n * opts.maxDfRatio))
   // 过滤两类词：
   //  ① df 过高（在当前记忆库里太常见，没有区分度——「文件」出现在 11% 的记忆里）；
   //  ② df=0（跨词伪 bigram：CJK bigram 切词会产生「那台」「台什」「风定」这类碎片，
