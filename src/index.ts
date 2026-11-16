@@ -253,6 +253,16 @@ const config = z.object({
    *  默认 0.15（需求方拍板 2026-11-13，原 0.4）：实测三句典型测试话在旧口径下只有
    *  2.9% / 9.5% / 4.5%，0.4 与 0.2 都命中不了；换分母后 0.15 三句全中。 */
   hitMinCoverage: z.number().min(0).max(1).default(0.15),
+  /** v0.43.1 混合召回的总分门槛（0.45×词面 + 0.55×向量）。
+   *
+   *  ⚠️ **和 hitMinCoverage 是两回事**：开了混合召回（默认）时，命中判定走这个分数，
+   *  `hitMinCoverage` 只在**降级到纯词面**（向量/模型不可用）时才生效。
+   *
+   *  默认 0.40，别随便往下调。实测（15 条正样本 + 15 条闲聊）：
+   *    0.40 → 负样本误命中 0/15
+   *    0.12 → 负样本误命中 **13/15**（「今天天气不错」这类闲聊会被注入一堆无关记忆）
+   *  原因：向量分对任何句子都有 ~0.5 的基线余弦，门槛就是拦这类噪声的唯一闸门。 */
+  hybridMinScore: z.number().min(0).max(1).default(0.40),
   /** 命中诊断日志（默认 false）：命中判定无论 0 条还是 N 条都打一行，含命中 id/coverage。
    *  排查「怎么从来不命中」时打开。⚠️ 这是排查工具不是日常开关，不进设置页表单——
    *  需求方拍板 2026-11-13；改它请走 cordis.patch.yml 或配置文件。 */
@@ -376,6 +386,7 @@ export function validateConfigUserLayer(value: unknown): void {
   reqStr('homeDir')
   reqNum('hitTopK')
   reqNum('hitMinCoverage')
+  reqNum('hybridMinScore')
   reqNum('titleMax')
   reqBool('reflect')
   reqNum('reflectTurns')
@@ -473,6 +484,8 @@ interface ResolvedConfig {
   homeDir: string | undefined
   hitTopK: number
   hitMinCoverage: number
+  /** 混合召回总分门槛（开了 hybrid 时生效，替代 hitMinCoverage）。 */
+  hybridMinScore: number
   /** 命中诊断日志开关（默认 false；不进设置页表单）。 */
   hitDebug: boolean
   /** 默认信任工作区记忆库（关掉 #64 预置库防护）。 */
@@ -504,6 +517,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     homeDir: typeof c.homeDir === 'string' ? c.homeDir : undefined,
     hitTopK: c.hitTopK ?? 3,
     hitMinCoverage: c.hitMinCoverage ?? 0.15,
+    hybridMinScore: c.hybridMinScore ?? 0.40,
     hitDebug: c.hitDebug ?? false,
     trustByDefault: c.trustByDefault ?? true,
     searchContentMax: c.searchContentMax ?? 400,
@@ -766,7 +780,7 @@ const SETTINGS_SOURCE_WAIT_MS = 250
 // 注册期消费的字段（projectDir/homeDir/enabled/delegate.modelSpec + setPromptLang 的
 // 启动调用）保持冻结：热改需要 dispose+重入，设置页按「需重载」语义对待（#26 同口径）。
 
-const LIVE_CONFIG_KEYS = ['hitTopK', 'hitMinCoverage', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
+const LIVE_CONFIG_KEYS = ['hitTopK', 'hitMinCoverage', 'hybridMinScore', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
 const LIVE_DREAM_KEYS = ['enabled', 'idleMinutes', 'suppressWindows', 'suppressLeadMinutes', 'checkMinutes', 'timeZone', 'rulesReviewDays'] as const
 
 /** 工作区是否在停用名单（归一后精确匹配）。导出供测试直调。 */
@@ -1542,7 +1556,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     ws: string,
     sid: string,
     text: string,
-    opts: { hitTopK: number; titleMax: number; hitMinCoverage: number; hitDebug: boolean },
+    opts: { hitTopK: number; titleMax: number; hitMinCoverage: number; hitDebug: boolean; hybridMinScore: number },
     dir: string,
     qv: Float32Array | null,
   ): Promise<HitResult | null> => {
@@ -1674,6 +1688,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
+          hybridMinScore: resolved.hybridMinScore,
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
@@ -1842,6 +1857,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
+          hybridMinScore: resolved.hybridMinScore,
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {

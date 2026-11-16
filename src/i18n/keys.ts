@@ -85,6 +85,8 @@ export const UI_KEYS = [
   'settings.field.hitTopK.hint',
   'settings.field.hitMinCoverage.label',
   'settings.field.hitMinCoverage.hint',
+  'settings.field.hybridMinScore.label',
+  'settings.field.hybridMinScore.hint',
   'settings.field.searchContentMax.label',
   'settings.field.searchContentMax.hint',
   'settings.field.titleMax.label',
