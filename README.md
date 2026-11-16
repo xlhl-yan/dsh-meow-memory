@@ -5,7 +5,88 @@
 
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）打造的跨会话记忆插件。
 
-当前版本 **0.31.0** ｜ 版本变更见 [CHANGELOG.md](CHANGELOG.md) ｜ 兼容 **dsh 0.1.5**
+当前版本 **0.41.0** ｜ 版本变更见 [CHANGELOG.md](CHANGELOG.md) ｜ 兼容 **dsh 0.1.5**
+
+> **这是 [`Phant0Meow/dsh-meow-memory`](https://github.com/Phant0Meow/dsh-meow-memory) 的 fork**，
+> 分支 `feat/recall-overhaul`，专项改造**召回质量**。上游基线 0.32.7；本分支从 0.33 起逐步
+> 重做命中链路（解除会话自锁 → 默认信任 → 门槛重做 → wait 轮注入 → 短查询 → 混合召回），
+> 当前 **0.41.0**。除召回层外，插件其余部分与上游一致。
+
+## 🔍 召回层：词面 + 语义向量混合（0.41.0）
+
+纯词面匹配（CJK bigram + IDF 加权覆盖率）有个先天缺陷：**字面重合 ≠ 语义相关**。
+讨论「这个记忆插件」和问「记忆插件怎么配」，字面几乎一样但意图不同；反过来
+「get_unread 队列逻辑」本该命中「会话 seq 水位」那条，词面却因为「队列」去命中
+「ComfyUI /queue clear」。
+
+五轮调参（分母口径、IDF 加权、最少命中数、专有名词例外、停用词、maxDf）之后确认这条路
+走不通，所以**只换打分，不动其余**：
+
+```
+0.45 × 词面(IDF 加权 coverage) + 0.55 × 向量(BGE 余弦)  → 总分门槛 0.40 → topK
+```
+
+| 指标（252 条真实库） | 纯词面 | 混合 |
+|---|---|---|
+| 15 条正样本命中 | 15/15 = 100% | **15/15 = 100%** |
+| 15 条负样本误命中 | 0/15 = 0% | **0/15 = 0%** |
+| 全量自命中 | 238/252 = 94.4% | **244/252 = 96.8%** |
+
+**为什么混合而不是纯向量**：纯向量会丢专有名词精度——`3081`、`48GB`、`wakeIntervalSec`
+这类词向量会糊，词面反而准。
+
+**为什么门槛是 0.40**：BGE 对任意两句中文都给 ~0.5 的基线余弦，闲聊（「我有点困了」top1
+0.577）和技术问句（「甩镜怎么做」top1 0.616）几乎重叠。但闲聊的**词面命中恒为 0**，
+0.40 正好挡住纯向量命中的闲聊，又放过有词面支撑的正样本。
+
+**降级安全**：依赖缺失、模型文件不在、加载失败 → 自动退回纯词面，插件不会挂。
+`hit-chain` 日志里的 `hybrid=vec|lex` 就是给这个用的。
+
+### 安装语义模型（需手动放一次）
+
+模型**不随仓库分发**（22.9MB ONNX，已在 `.gitignore` 排除）。放到包根目录：
+
+```
+meow-memory/
+└── models/
+    └── Xenova/bge-small-zh-v1.5/
+        ├── config.json
+        ├── tokenizer.json
+        ├── tokenizer_config.json
+        └── onnx/model_quantized.onnx
+```
+
+**方式：镜像站直接下（1~2 分钟）**
+
+```bash
+mkdir -p models/Xenova/bge-small-zh-v1.5/onnx
+for f in config.json tokenizer.json tokenizer_config.json onnx/model_quantized.onnx; do
+  curl -L -o "models/Xenova/bge-small-zh-v1.5/$f" \
+    "https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main/$f"
+done
+```
+
+**给存量记忆补算向量**
+
+```bash
+node scripts/migrate-embeddings.mjs <工作区路径>   # 例：D:/AgentTools/qq-bridge/state/agents
+node scripts/verify-hybrid.mjs                    # 可选：词面 vs 混合的全量对比
+```
+
+> 缺模型时插件照常工作，只是 `hybrid=lex`（纯词面）。补上模型后重启即切到混合。
+
+### 换成更大的模型
+
+改 `src/embedding.ts` 的 `DEFAULT_EMBEDDING_MODEL` 并重跑迁移。实测对比：
+
+| | bge-small(23MB) | bge-base(312MB) |
+|---|---|---|
+| 单条推理 | **32ms** | 78ms |
+| 常驻内存 | **150MB** | 1288MB |
+| 批量 252 条 | **13.7s** | 143s |
+| top5 相关率 | 80% | 82% |
+
+默认选 small：base 只多 +2pp，却要多 1.1GB 常驻内存和 10 倍批量耗时。
 
 ## ✨ 功能特性
 
