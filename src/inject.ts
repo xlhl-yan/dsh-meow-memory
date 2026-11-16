@@ -42,6 +42,14 @@ const MAX_QUERY_CHARS = 4000
  *  source_session 排除，剩下的又全在 injected 里，最终没有一条能再被命中。 */
 export const MAX_RECENT_INJECTED = 40
 
+/** 命中链路的最少命中 token 数（v0.37.0）。只撞上 1 个词就注入是误注入的主要来源：
+ *  实测「等视频渲染完再说」撞一个「渲染」就注入 4 条全无关的记忆。 */
+export const MIN_HIT_COUNT = 2
+
+/** 单命中的「强覆盖」例外阈值（v0.37.0）：只命中 1 个 token，但它覆盖了查询一半以上
+ *  的信息量时仍然放行（「画风定成什么了」→ 只中「画风」，cov 0.55）。 */
+export const STRONG_COVERAGE = 0.5
+
 /** 命中诊断日志出口（apply 期由宿主 logger 注入；null = 不输出）。
  *  与 setMemoryToolGate 同款：模块级注入，避免把 ctx 一路透传到打分链路。 */
 let hitDebugLogger: ((msg: string) => void) | null = null
@@ -64,6 +72,9 @@ const QUERY_STOP_TOKENS = new Set([
   '等于', '现在', '今天', '明天', '昨天', '想要', '需要', '希望', '这样', '那样',
   '就是', '还是', '但是', '因为', '所以', '如果', '然后', '已经', '没有', '一些',
   '这里', '那里', '你的', '我的', '他的', '自己',
+  // v0.37.0 补：问句碎片。「双卡32G是什么意思」曾靠「是什/么意/意思」三个碎片命中一条
+  // 毫不相关的记忆（cov=74%）——这类词是「X 是什么意思」的固定尾巴，永远不承载语义。
+  '是什', '么意', '意思', '几点',
 ])
 
 /** 短条目阈值（token 数）与它的宽松覆盖率门槛：只有寥寥几个关键词的条目（早期无
@@ -635,8 +646,8 @@ function hitQuery(
     content: d.keywords.length > 0 ? d.keywords.join(' ') : d.content.slice(0, 100),
   }))
   // k 传候选池全量：门槛过滤与降权都在本层做，先截断会丢掉本该进榜的条目。
-  // maxDfRatio 0.08：过滤掉「在八成以上记忆里都有」的查询词，它们没有区分度。
-  const hits = keywordHitScore(query, docs, { k: hitRows.length, maxDfRatio: 0.08 })
+  // maxDfRatio 0.05（v0.37.0，原 0.08）：decisions 里 5% 的条目都含有的词已经不算有区分度。
+  const hits = keywordHitScore(query, docs, { k: hitRows.length, maxDfRatio: 0.05 })
   // 覆盖率门槛按条目长度分档：长条目要求命中比例高（防"通用词一碰就整条注入"），
   // 短条目放宽（分母太小，比例天然偏高/偏低）。hitMinCoverage=0 时整档关闭。
   // 长度用去重 token 数，与 bm25 里 coverage 的分母保持同一口径。
@@ -646,17 +657,37 @@ function hitQuery(
     const len = docLen.get(id) ?? 0
     return len > 0 && len <= SHORT_DOC_TOKENS ? Math.min(o.hitMinCoverage, SHORT_DOC_MIN_COVERAGE) : o.hitMinCoverage
   }
-  const kept = hits.filter((h) => (h.coverage ?? 0) >= thresholdOf(h.id))
-  // 命中诊断（需求方要求：没命中也要打，带最高 coverage，否则「怎么从来不命中」只能瞎猜）。
+  // v0.37.0：除覆盖率门槛外再加「最少命中数」下限。measured：真实使用里 8 次错 6 次，
+  // 其中所有误注入的命中数都是 1（「等视频渲染完再说」撞一个「渲染」就注入 4 条）。
+  // 只撞上 1 个词就注入，是误注入的主要来源；宁可不注入，也别注入错的。
+  //
+  // v0.37.0：除覆盖率门槛外再加「最少命中数」下限。实测真实使用里 8 次错 6 次，其中所有
+  // 误注入的命中数都是 1（「等视频渲染完再说」撞一个「渲染」就注入 4 条全无关的记忆）。
+  // 只撞上 1 个词就注入，是误注入的主要来源；宁可不注入，也别注入错的。
+  //
+  // 例外：单命中但命中的是**专有名词级 token**（含数字或拉丁字母）时放行。
+  // 「3081 又怎么了？」过滤后只剩「3081」，「AutoDL 那台什么配置」的目标记忆只含「autodl」
+  // ——这类词的指向性极强，命中一个就是强信号；而「渲染」「猜谜」这类普通中文词撞上不能算。
+  // （试过「查询有效词 <=2 就放宽」，负样本掉到 5/10，因为大多数短查询都符合；按命中词性质
+  //  判断才准。）
+  const minHc = MIN_HIT_COUNT
+  const kept = hits.filter((h) => {
+    if ((h.coverage ?? 0) < thresholdOf(h.id)) return false
+    return (h.hitCount ?? 0) >= minHc || h.properHit === true
+  })
+  // 命中诊断（需求方要求：没命中也要打，带最高 coverage + 被拒原因，否则只能瞎猜）。
   if (o.hitDebug && hitDebugLogger !== null) {
-    const qLen = new Set(tokenize(query).filter((t) => t.length >= 2)).size
+    const qTokens = [...new Set(tokenize(query).filter((t) => t.length >= 2))]
     const top = hits.length > 0 ? Math.max(...hits.map((h) => h.coverage ?? 0)) : 0
+    const rejected = hits.filter((h) => !kept.includes(h)).slice(0, 3)
+    const rejStr = rejected.map((h) => `${h.id.slice(0, 9)}(cov=${(h.coverage ?? 0).toFixed(2)},hc=${h.hitCount ?? 0})`).join(' ')
     if (kept.length === 0) {
-      hitDebugLogger(`meow-memory: hit: 0 条（最高 coverage=${top.toFixed(2)} < ${o.hitMinCoverage}，query tokens=${qLen}，候选=${hitRows.length}）`)
+      hitDebugLogger(`meow-memory: hit: 0 条（query tokens=${qTokens.length}，候选=${hitRows.length}，最高 coverage=${top.toFixed(2)} < ${o.hitMinCoverage}）`)
     } else {
-      const detail = kept.map((h) => `${h.id.slice(0, 9)}(${(h.coverage ?? 0).toFixed(2)})`).join(', ')
-      hitDebugLogger(`meow-memory: hit: ${kept.length} 条（query tokens=${qLen}，候选=${hitRows.length}） → ${detail}`)
+      hitDebugLogger(`meow-memory: hit: ${kept.length} 条（query tokens=${qTokens.length}，候选=${hitRows.length}） → ${kept.map((h) => `${h.id.slice(0, 9)}(cov=${(h.coverage ?? 0).toFixed(2)},hc=${h.hitCount ?? 0})`).join(', ')}`)
     }
+    hitDebugLogger(`meow-memory:   query: ${qTokens.join(' ')}`)
+    if (rejStr.length > 0) hitDebugLogger(`meow-memory:   被拒(门槛 ${o.hitMinCoverage}/hc>=${minHc}): ${rejStr}`)
   }
   const byId = new Map(hitRows.map((r) => [r.id, r]))
   // 展示/注入用原文 content（docs 的 content 只是 keywords 匹配面，不能当正文）。

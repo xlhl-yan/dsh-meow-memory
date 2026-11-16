@@ -231,10 +231,22 @@ export interface RankedHit {
   importance: number
   updated_at: number
   score: number
-  /** 文档关键词覆盖率（正文/标题 token 中有多大比例被查询命中）。命中链路用它做
+  /** 文档关键词覆盖率（IDF 加权：命中词权重和 / 查询词权重和）。命中链路用它做
    *  绝对门槛：没有门槛时 raw>0 即入候选，长文档靠通用词就能挤进 top-K。
    *  仅 keywordHitScore 计算并返回。 */
   coverage?: number
+  /** 命中的**不同 token 数**（仅 keywordHitScore 返回）。命中链路用它做「最少命中数」
+   *  下限：只撞上 1 个词就注入是误注入的主要来源（实测「等视频渲染完再说」4 条误注
+   *  全是 hc=1）。 */
+  hitCount?: number
+  /** 查询侧**有效 token 数**（过滤虚词 / df=0 碎片 / 高频词之后）。命中链路用它做例外：
+   *  查询本身只剩 1 个有效词时（「画风定成什么了」→ 只剩「画风」），hc 恒为 1，
+   *  不能再用 hc>=2 拦——那时单命中就是 100% 覆盖，是强信号。 */
+  qEffSize?: number
+  /** 命中的 token 里是否有「专有名词级」的（含数字或拉丁字母）。命中链路在 hc=1 时用它做
+   *  例外：`3081`、`autodl`、`fl2va` 这类有强指向性，`渲染`、`猜谜` 没有。
+   *  实测：「3081 又怎么了？」只剩一个有效词「3081」，若一律要求 hc>=2 则永不命中。 */
+  properHit?: boolean
   /** 分项得分（#51，explain=true 时才有）：bm25=关键词原始分、importance=条目重要度、
    *  recencyWeight=艾宾浩斯权重（importance≥3 或分数贴近榜首时不衰减，恒 1）、
    *  score=最终分（bm25 × recencyWeight）。状态过滤（active/stale）是检索前的二值
@@ -376,12 +388,18 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
   // 实测「帮我看看这个文件」滤掉虚词后只剩「文件」，而「文件」出现在 24/207 条记忆里
   // （11.6%），命中它会让 24 条记忆全部以 coverage=0.50 挤进候选；「甩镜」只有 2.9%，
   // 才是真正有指向性的词。默认阈值 8%（只有当调用方显式传 maxDfRatio 才生效）。
-  const maxDf = opts.maxDfRatio === undefined ? Infinity : Math.max(3, Math.floor(n * opts.maxDfRatio))
-  const qEff = [...qTf].filter(([t]) => (df.get(t) ?? 0) <= maxDf)
+  const maxDf = opts.maxDfRatio === undefined ? Infinity : Math.max(2, Math.floor(n * opts.maxDfRatio))
+  // 过滤两类词：
+  //  ① df 过高（在当前记忆库里太常见，没有区分度——「文件」出现在 11% 的记忆里）；
+  //  ② df=0（跨词伪 bigram：CJK bigram 切词会产生「那台」「台什」「风定」这类碎片，
+  //     它们在任何记忆里都不存在，却会拿到最大 IDF，把加权分母撑大 2-4 倍）。
+  // ② 是 IDF 加权能成立的前提：分母只算「真实存在于语料里」的词。
+  const qEff = [...qTf].filter(([t]) => {
+    const d = df.get(t) ?? 0
+    return d > 0 && d <= maxDf
+  })
   const qTfEff = new Map(qEff)
   if (qTfEff.size === 0) return []
-  /** 查询侧去重 token 数（已滤掉虚词 / 过于常见的词）：覆盖率分母取它与文档长度的较小者。 */
-  const qLen = qTfEff.size
 
   const raw: number[] = docs.map((_, di) => {
     let s = 0
@@ -396,14 +414,24 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
     if (raw[di] <= 0) continue
     const len = docLens[di]
     let overlap = 0
-    for (const t of qTfEff.keys()) if (tf[di].has(t)) overlap++
-    // 覆盖率分母取「查询 token 数」与「记忆关键词 token 数」的**较小者**（需求方拍板 2026-11-13）。
-    // 原口径 ÷ 记忆长度：一条记忆 keywords 8-13 个词 → tokenize 后 20-44 token，而用户一句话
-    // 只有 4-6 token，coverage 只能落在 2-9%——任何 ≥0.2 的门槛都过不了（实测「甩镜怎么做」
-    // 最高 2.9%、「qq 消息重复」9.5%）。语义上也不对：该问的是「你这句话有多少被这条记忆
-    // 覆盖」，不是「这条记忆有多少被你念到」；记忆长、查询短是本质特征，两边都合理，错的是公式。
-    const denom = Math.min(qLen, len)
-    const coverage = denom > 0 ? overlap / denom : 0
+    let overlapW = 0
+    let denomW = 0
+    const hitTokens: string[] = []
+    for (const t of qTfEff.keys()) {
+      const tw = idf(t)
+      denomW += tw
+      if (tf[di].has(t)) { overlap += 1; overlapW += tw; hitTokens.push(t) }
+    }
+    // v0.37.0（用户第三批需求）：覆盖率改 **IDF 加权**，不再数个数。
+    // 数个数时「消息 + 工具」和「FL2VA + 首帧」撞上 2 个都是 2 分；加权后通用词 IDF 低
+    // （撞上也不加分），稀有词 IDF 高（撞一个就显著提分）。分母用查询词权重和，语义是
+    // 「你这句话里的信息量，有多少被这条记忆覆盖了」。
+    //
+    // 关键前提：分母里的词必须是**记忆库里真实存在**的（df>0，见上面的 qEff 过滤）。
+    // 跨词伪 bigram（「那台」「台什」「风定」）df=0 会拿到最大 IDF 6.1，把分母撑大 2-4 倍
+    // ——实测「AutoDL 那台什么配置」denomW=19.5 里有 12.2 来自两个不存在的词，
+    // 真正的 autodl(3.0) 只占 15%，正好卡在门槛线上。
+    const coverage = denomW > 0 ? overlapW / denomW : 0
     if (opts.minCoverage !== undefined && coverage < opts.minCoverage) continue
     let w = 1
     if (now !== null && docs[di].importance < 3 && !(raw[di] >= 0.85 * maxRaw)) {
@@ -420,6 +448,9 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
       updated_at: docs[di].updated_at,
       score: raw[di] * coverage * w * impW * (titleHit ? 1.2 : 1),
       coverage,
+      hitCount: overlap,
+      qEffSize: qTfEff.size,
+      properHit: hitTokens.some((t) => /[0-9]/.test(t) || /[a-z]/i.test(t)),
     })
   }
   out.sort((a, b) => b.score - a.score)
