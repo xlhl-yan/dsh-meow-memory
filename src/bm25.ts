@@ -247,6 +247,10 @@ export interface RankedHit {
    *  例外：`3081`、`autodl`、`fl2va` 这类有强指向性，`渲染`、`猜谜` 没有。
    *  实测：「3081 又怎么了？」只剩一个有效词「3081」，若一律要求 hc>=2 则永不命中。 */
   properHit?: boolean
+  /** 命中 token 的 IDF 之和（仅 keywordHitScore 返回）。命中链路用它做单命中门槛：
+   *  短查询有效词常只剩 1 个（「甩镜怎么做」→ 只剩「甩镜」），hc>=2 永不满足，
+   *  改看「命中的词够不够有信息量」（「甩镜」idfSum 3.77 → 放行）。 */
+  idfSum?: number
   /** 分项得分（#51，explain=true 时才有）：bm25=关键词原始分、importance=条目重要度、
    *  recencyWeight=艾宾浩斯权重（importance≥3 或分数贴近榜首时不衰减，恒 1）、
    *  score=最终分（bm25 × recencyWeight）。状态过滤（active/stale）是检索前的二值
@@ -451,6 +455,7 @@ export function keywordHitScore(query: string, docs: Doc[], opts: SearchOptions 
       hitCount: overlap,
       qEffSize: qTfEff.size,
       properHit: hitTokens.some((t) => /[0-9]/.test(t) || /[a-z]/i.test(t)),
+      idfSum: overlapW,
     })
   }
   out.sort((a, b) => b.score - a.score)

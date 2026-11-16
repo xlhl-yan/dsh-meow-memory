@@ -46,6 +46,12 @@ export const MAX_RECENT_INJECTED = 40
  *  实测「等视频渲染完再说」撞一个「渲染」就注入 4 条全无关的记忆。 */
 export const MIN_HIT_COUNT = 2
 
+/** 单命中放行所需的 IDF 权重和（v0.39.0）。短查询的有效词常只剩 1 个，hc>=2 在数学上
+ *  永不满足（实测「甩镜怎么做」过滤后只剩「甩镜」、「AutoDL 那台什么配置」只剩
+ *  「那台/配置」而没有任何一条记忆同时含这两个词）——这两条就这样全灭。改看「命中的词
+ *  够不够有信息量」：「甩镜」idfSum 3.77 放行。 */
+export const MIN_IDF_SUM = 2.0
+
 /** 单命中的「强覆盖」例外阈值（v0.37.0）：只命中 1 个 token，但它覆盖了查询一半以上
  *  的信息量时仍然放行（「画风定成什么了」→ 只中「画风」，cov 0.55）。 */
 export const STRONG_COVERAGE = 0.5
@@ -75,6 +81,12 @@ const QUERY_STOP_TOKENS = new Set([
   // v0.37.0 补：问句碎片。「双卡32G是什么意思」曾靠「是什/么意/意思」三个碎片命中一条
   // 毫不相关的记忆（cov=74%）——这类词是「X 是什么意思」的固定尾巴，永远不承载语义。
   '是什', '么意', '意思', '几点',
+  // v0.39.0：日常应答/闲聊词。它们偶尔混进某些记忆的 keywords 里，IDF 反而很高
+  //（「吃饭」在 238 条里只出现 1-2 次 → idf 5.07，比正样本「甩镜」的 3.77 还高），
+  // 单命中放行后就会误命中。已核实「知道/收到」等只出现在正文（13/5 条）、不在匹配面里，
+  // 加进表不会误伤；真正在 keywords 里的只有「好的」(4 条) 和「吃饭」(1 条)。
+  '好的', '吃饭', '睡觉', '知道', '收到', '谢谢', '再见', '拜拜', '晚安', '早安',
+  '累了', '休息', '忙吗', '干嘛', '去哪',
 ])
 
 /** 短条目阈值（token 数）与它的宽松覆盖率门槛：只有寥寥几个关键词的条目（早期无
@@ -673,7 +685,7 @@ function hitQuery(
   const minHc = MIN_HIT_COUNT
   const kept = hits.filter((h) => {
     if ((h.coverage ?? 0) < thresholdOf(h.id)) return false
-    return (h.hitCount ?? 0) >= minHc || h.properHit === true
+    return (h.hitCount ?? 0) >= minHc || h.properHit === true || (h.idfSum ?? 0) >= MIN_IDF_SUM
   })
   // 命中诊断（需求方要求：没命中也要打，带最高 coverage + 被拒原因，否则只能瞎猜）。
   if (o.hitDebug && hitDebugLogger !== null) {
