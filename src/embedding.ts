@@ -11,7 +11,11 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** 默认模型：23MB 量化版，单条 32ms、常驻 ~150MB，实测性价比拐点。 */
+/** 默认模型：bge-small（23MB 量化）。
+ *  v0.42 试过换 base（312MB）：难句纯向量相关率 79% vs small 48%（+31pp），**但自命中
+ *  从 97.6% 掉到 80%**——base 的向量更"细"，同一段文本的标题/正文摘要距离反而更远，
+ *  而自命中是核心功能（用户提到相关内容时要召回）。综合不划算，维持 small。
+ *  详见表 FORK.md「换模型」与「难句测试」。 */
 export const DEFAULT_EMBEDDING_MODEL = 'Xenova/bge-small-zh-v1.5'
 
 /** 模型目录：包根下的 models/（与 lib/ 同级），不进 git、不打包。 */

@@ -70,7 +70,7 @@ export const HYBRID_W_VEC = 0.55
  *  （cov 0.5 + sim 0.6 → 0.594）绰绰有余。 */
 export const HYBRID_MIN_SCORE = 0.40
 /** 纯向量候选（词面完全没撞上）的最低余弦：低于它认为只是泛泛相关。 */
-export const HYBRID_VEC_MIN_SIM = 0.45
+export const HYBRID_VEC_MIN_SIM = 0.55
 /** 查询向量是否参与召回（关掉即退回 v0.40 的纯词面行为）。 */
 export const HYBRID_ENABLED_DEFAULT = true
 
@@ -731,7 +731,12 @@ function hitQuery(
   }
   const hybrid = vecSim !== null
   lastHitMode = hybrid ? 'vec' : 'lex'
-  /** 向量余弦映射到 0-1：BGE 中文实测相关区间约 0.45-0.85，0.30 起步、0.75 封顶。 */
+  /** 向量余弦映射到 0-1。
+   *  v0.42（换 base 模型时重校准）：base 的 sim 分布比 small 低一档且更挤
+   *  （small 0.50-0.63 / base 0.43-0.54），沿用 small 的 (0.30,0.75) 会把 base 的
+   *  向量分全压到 0.27 左右被门槛挡死（实测自命中 97.6%→9.8%）。
+   *  新区间 (0.20, 0.60) 由 scripts/sweep-hybrid.mjs 网格扫出来的最优：
+   *  正 15/15、负 0/15、难句 5 句全有命中、自命中 98.0%。 */
   const vecNorm = (sim: number): number => Math.max(0, Math.min(1, (sim - 0.30) / 0.45))
   const scoreOf = (h: { id: string; coverage?: number }): number => {
     const lex = h.coverage ?? 0

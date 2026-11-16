@@ -4,9 +4,11 @@
  */
 import { resolve } from 'node:path';
 import { env, pipeline } from '@xenova/transformers';
-import { getDb, buildHitInjection } from '../lib/index.js';
+import { getDb, buildHitInjection, embeddingModelId } from '../lib/index.js';
 
-const MODEL = 'Xenova/bge-small-zh-v1.5';
+// 不能写死模型名：换模型后这里若仍是旧名，查询向量与库存量维度不符（512 vs 768），
+// 余弦恒为 0，混合分会全被门槛压掉（实测自命中假跌到 9.4%）。
+const MODEL = embeddingModelId();
 const WS = 'D:/AgentTools/qq-bridge/state/agents';
 const DIR = '.dsh-meow';
 
