@@ -298,10 +298,97 @@ base 的分数整体偏低且挤在一起，被门槛全部拒掉，命中只剩
    `'Xenova/bge-small-zh-v1.5'`，换 base 后查询向量还是 512 维、库存量是 768 维，
    余弦恒为 0 → 自命中假跌到 9.8%。**必须用 `embeddingModelId()` 从 lib 取。**
 
+## cross-encoder 精排（0.43）
+
+混合召回用的是 **bi-encoder**（bge-small）：查询和文档**分别编码**再比余弦，**看不到两者的交互**。
+所以「那个烤显卡的家伙」永远连不上记忆里的「AutoDL 实例」—— 它们没有共享的词，语义向量也
+不在同一个点附近。
+
+**cross-encoder** 把 `query + doc` 拼一起过一遍模型，直接判断「这条记忆回答了这个问题吗」。
+这是唯一能跨过「口语 ↔ 术语」鸿沟的手段。
+
+### 两阶段流程
+
+```
+混合召回（门槛 0.40）
+    ↓ 看 top1 的分数
+    ├─ >= 0.75 → 已经很确定，直接注入（0ms）
+    └─ <  0.75 → 低门槛(0.15)重召回 10 条 → rerank → topK（约 1.4 秒）
+```
+
+**为什么要重召回**：门槛 0.40 对难句只剩 1-2 条候选，精排无从下手。放宽到 0.15 能捞到 10 条，
+最终由 rerank 分数决定取谁 —— 所以低门槛在这里是安全的。
+
+### 实测（5 句难句，人工判定相关条数）
+
+| 难句 | 混合召回 | + rerank |
+|---|---|---|
+| 那个烤显卡的家伙还能租吗 | 2 条 | **5/5 全相关** |
+| 两个角色谁站前面谁站后面 | 1 条 | **3/5** |
+| 怎么让画面别那么肉 | 0.5/5 | 1/5（救不了） |
+| 换场那一下最费劲 | 0/1 | 0.5/5（救不了） |
+| 画出来的人不像 | 2/4 | **3.5/5** |
+| **合计** | **4.5 条 / 约 35%** | **13 条 / 约 52%** |
+
+**相关条数接近 3 倍。** 但注意：有 2 句无论怎么精排都救不了（「别那么肉」「换场那一下」），
+说明那类查询在库里的记忆本身就没写清楚，不是检索层能修的。
+
+### 触发阈值 0.75
+
+| 阈值 | 难句触发 | 正样本触发 | 评价 |
+|---|---|---|---|
+| 0.55 | 3/5 | 0/15 | 漏掉「烤显卡」(0.57) |
+| **0.75** | **5/5** | **6/15** | ✅ 采用 |
+| 总是精排 | 5/5 | 15/15 | 正常查询全部白付 1.4 秒 |
+
+> ⚠️ **`topScore` 高不代表召回对**：「别那么肉」topScore 0.72（比多数正样本还高）但结果很差
+> —— 词面撞上了「画面」。所以这个阈值只能当**成本开关**，不能当质量判据。
+
+### 性能
+
+| | 量化版(266MB) | fp32(1060MB) |
+|---|---|---|
+| 单条推理 | **106ms** | 231ms |
+| 模型加载 | 1.3 秒 | 2.6 秒 |
+| 10 条池子 | **约 1.4 秒** | 约 2.4 秒 |
+
+**日常场景零额外延迟**（topScore ≥ 0.75 不触发），只有模糊问题才付这 1.4 秒。
+
+### 装模型
+
+```bash
+# 量化版只有 HF 有（魔搭的 BAAI/bge-reranker-base 是 fp32 ONNX，1GB）
+mkdir -p models/Xenova/bge-reranker-base/onnx
+curl -L -o models/Xenova/bge-reranker-base/onnx/model_quantized.onnx \
+  "https://hf-mirror.com/Xenova/bge-reranker-base/resolve/main/onnx/model_quantized.onnx"
+# 还需要 tokenizer 等（可从魔搭拿，快得多）：
+for f in config.json tokenizer.json tokenizer_config.json special_tokens_map.json sentencepiece.bpe.model; do
+  curl -L -o "models/Xenova/bge-reranker-base/$f" \
+    "https://www.modelscope.cn/models/BAAI/bge-reranker-base/resolve/master/$f"
+done
+```
+
+> **魔搭比 hf-mirror 快 13 倍**（实测 9.86 MB/s vs 0.73 MB/s）。国内下模型优先用魔搭。
+
+缺模型时插件照常工作（`rerankScores` 返回 null → 保持混合召回的原始顺序）。
+
+### 三个踩过的坑
+
+1. **必须取原始 logits**：transformers.js 的 `text-classification` pipeline 会把单 logit
+   softmax 成 1，所有文档分数都是 1、排序完全失效。改用
+   `AutoModelForSequenceClassification` 直接取 `logits.data[0]`（负 logit，越大越相关）。
+2. **精排路径要低门槛重召回**：否则候选只有 1-2 条，精排没得排。
+3. **重排后要重新 commit**：`buildHitInjection` 默认自己 markInjected + bumpHit；
+   rerank 会重排候选，必须在重排后统一提交一次（新增 `skipCommit` 参数），
+   否则「已见」记录两遍，下一轮会过度去重。
+
 ## 回退
 
 想把召回换回纯词面：`InjectOptions.hybrid = false`（内部 opts，不改库、不改数据）。
 向量表留着不影响任何东西。
+
+想关掉精排：删掉 `models/Xenova/bge-reranker-base/` 即可（自动降级，不报错）；
+或把 `src/index.ts` 的 `RERANK_TRIGGER` 设为 `Infinity`（永远不触发）。
 
 ## 已知限制
 

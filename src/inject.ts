@@ -32,6 +32,10 @@ export interface InjectOptions {
   /** 混合召回开关（v0.41.0，默认 true）：关掉退回纯词面（v0.40 行为），用于排查
    *  「是向量在捣乱还是词面本来就不行」。 */
   hybrid?: boolean
+  /** v0.43：覆盖 HYBRID_MIN_SCORE。cross-encoder 精排路径要先用低门槛（0.15）捞一个大
+   *  池子——0.40 对难句只剩 1-2 条候选，精排无从下手；最终由 rerank 分数决定取舍，
+   *  所以这里放宽是安全的。 */
+  hybridMinScore?: number
 }
 
 const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 0.15, hitDebug: false, hybrid: true }
@@ -759,7 +763,7 @@ function hitQuery(
   const kept = [...pool.values()]
     .map((h) => ({ ...h, hybridScore: scoreOf(h) }))
     .filter((h) => {
-      if (hybrid) return h.hybridScore >= HYBRID_MIN_SCORE
+      if (hybrid) return h.hybridScore >= (o.hybridMinScore ?? HYBRID_MIN_SCORE)
       if ((h.coverage ?? 0) < thresholdOf(h.id)) return false
       return (h.hitCount ?? 0) >= minHc || h.properHit === true || (h.idfSum ?? 0) >= MIN_IDF_SUM
     })
@@ -785,7 +789,13 @@ function hitQuery(
     .slice(0, Math.max(0, o.hitTopK))
     .map(({ h }) => {
       const row = byId.get(h.id)
-      return { id: h.id, level: h.level, content: row?.content ?? h.content, project: row?.project ?? null, updated_at: row?.updated_at ?? null }
+      // hybridScore 必须带出去：调用方用 top1 的分数判断要不要补 cross-encoder 精排
+      //（丢了它 topScore 恒为 0，每次都会误触发精排，白花几百毫秒）。
+      return {
+        id: h.id, level: h.level, content: row?.content ?? h.content,
+        project: row?.project ?? null, updated_at: row?.updated_at ?? null,
+        hybridScore: h.hybridScore ?? h.score ?? 0,
+      }
     })
 }
 
@@ -797,21 +807,28 @@ function hitQuery(
  * 条目间空行）。返回文本作为独立 plugin snapshot 消息的正文。
  * @returns 命中注入块；无命中返回 null。
  */
-export function buildHitInjection(
-  db: MemoryDb,
-  workspace: string,
-  sessionId: string,
-  userText: string,
-  opts: Partial<InjectOptions> = {},
-  dir = '.dsh-meow',
-  /** v0.41.0：调用方（async）预算好的查询向量；null/省略 = 纯词面。 */
-  queryVec: Float32Array | null = null,
-): { text: string; injectedIds: string[] } | null {
-  const o = { ...DEFAULT_OPTS, ...opts }
-  const fresh = hitQuery(db, workspace, sessionId, userText, o, dir, queryVec)
-  if (fresh.length === 0) return null
+export interface HitCandidate {
+  id: string
+  level: string
+  content: string
+  project: string | null
+  updated_at: number | null
+}
+
+export interface HitResult {
+  text: string
+  injectedIds: string[]
+  /** 混合召回 top1 的总分（0-1）。调用方据此决定要不要补一次 cross-encoder 精排：
+   *  分数高说明已经很确定，精排是浪费；难句才会低分。 */
+  topScore: number
+  /** 候选明细（已按混合分排序、已截断到 topK），rerank 后重排需要。 */
+  candidates: HitCandidate[]
+}
+
+/** 把候选拼成注入块正文（rerank 重排后复用，保证两种路径格式一致）。 */
+export function formatHitBlock(items: HitCandidate[]): string {
   const lines = [keyedValue('labels', 'inject.hitHeader')]
-  for (const h of fresh) {
+  for (const h of items) {
     // 原文视图：归属 + 完整 id + 绝对/相对时间戳（记忆时间戳=updated_at 最后更新时间；无时间戳不显示），第二行完整内容。
     const proj = projectLabel(h.project)
     const time = h.updated_at
@@ -821,14 +838,49 @@ export function buildHitInjection(
     lines.push(h.content)
     lines.push('')
   }
-  const text = lines.join('\n').trimEnd()
-  const ids = fresh.map((h) => h.id)
+  return lines.join('\n').trimEnd()
+}
+
+/** 标记已注入 + 计 hit_count（注入=使用，#91）。rerank 路径重排后也要调，否则
+ *  注入的 id 和「本会话已见」记录对不上，下一轮会重复注入同一条。 */
+export function commitHitInjection(
+  db: MemoryDb,
+  workspace: string,
+  sessionId: string,
+  items: HitCandidate[],
+  dir: string,
+): void {
+  const ids = items.map((h) => h.id)
   markInjected(workspace, sessionId, ids, dir)
-  // #91：注入=使用。自动注入是记忆进入上下文的主路径，此前只有 memory_search
-  // 计数——hit_count/last_accessed_at 的冷热信号接在错误事件上（被搜过≠被用过，
-  // 编辑≠使用）。首轮快照注入刻意不计：全量一过没有区分度，只会淹没信号。
-  for (const h of fresh) db.bumpHit(h.level as Parameters<MemoryDb['bumpHit']>[0], h.id)
-  return { text, injectedIds: ids }
+  for (const h of items) db.bumpHit(h.level as Parameters<MemoryDb['bumpHit']>[0], h.id)
+}
+
+export function buildHitInjection(
+  db: MemoryDb,
+  workspace: string,
+  sessionId: string,
+  userText: string,
+  opts: Partial<InjectOptions> = {},
+  dir = '.dsh-meow',
+  /** v0.41.0：调用方（async）预算好的查询向量；null/省略 = 纯词面。 */
+  queryVec: Float32Array | null = null,
+  /** 内部用：跳过 markInjected/bumpHit。rerank 路径会重排候选，必须由调用方在重排后
+   *  统一提交一次，否则「已见」记录会被提交两次（旧 top5 + 新 top3），过度去重。 */
+  skipCommit = false,
+): HitResult | null {
+  const o = { ...DEFAULT_OPTS, ...opts }
+  const fresh = hitQuery(db, workspace, sessionId, userText, o, dir, queryVec)
+  if (fresh.length === 0) return null
+  const candidates: HitCandidate[] = fresh.map((h) => ({
+    id: h.id, level: h.level, content: h.content, project: h.project ?? null, updated_at: h.updated_at,
+  }))
+  const text = formatHitBlock(candidates)
+  if (!skipCommit) commitHitInjection(db, workspace, sessionId, candidates, dir)
+  // topScore 用 hitQuery 内部算出的混合分（命中为空时上面已 return null）
+  const topScore = (fresh[0] as { hybridScore?: number; score?: number }).hybridScore
+    ?? (fresh[0] as { score?: number }).score
+    ?? 0
+  return { text, injectedIds: candidates.map((h) => h.id), topScore, candidates }
 }
 
 // 导出 tokenize 供索引/测试复用

@@ -48,7 +48,8 @@ import {
   shortSessionId,
   type DreamConfig,
 } from './dream.js'
-import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, isReinjectPending, lastHitModeOf, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen, setHitDebugLogger } from './inject.js'
+import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, commitHitInjection, formatHitBlock, isReinjectPending, lastHitModeOf, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen, setHitDebugLogger, type HitResult } from './inject.js'
+import { rerankScores, rerankUnavailable } from './rerank.js'
 import { migrateLegacy } from './migrate.js'
 import { buildReflectMessage, consecutiveToolSteps, PLUGIN_SOURCE, REFLECT_MARKER, scanTurn } from './reflect.js'
 import { isMeowSource } from './source.js'
@@ -70,6 +71,23 @@ import {
 const WELCOME_GUIDE_SEEN_ID = '__welcomeGuide__'
 /** 首建提示的 accessed 哨兵（issue #37 增量①；per-session 至多一次）。 */
 const FIRST_CREATE_NOTICE_SEEN_ID = '__firstCreateNotice__'
+
+/** v0.43 rerank 触发阈值：混合召回 top1 低于它才做 cross-encoder 精排。
+ *  0.55 的依据：15 条正样本的混合分全部 ≥0.40 且多数在 0.6+，而 5 句难句实测 top1 多在
+ *  0.3-0.5。定在 0.55 让日常查询完全跳过精排（0ms），只对模糊问题付那几百毫秒。 */
+/** v0.43 rerank 触发阈值：混合召回 top1 低于它才做 cross-encoder 精排。
+ *  0.75 是实测出来的：
+ *    - 5 句难句的 topScore 是 0.40 / 0.47 / 0.52 / 0.57 / 0.72 → **全部 < 0.75**，都会精排
+ *    - 15 条正样本只有 6 条触发（40%），负样本 0 条触发
+ *  定得更低（0.55）会漏掉「烤显卡」(0.57) 这种，定到「总是精排」则连正常查询也白付 1.5 秒。
+ *  注意：**topScore 高不代表召回对**（「别那么肉」0.72 但结果很差），所以这个阈值只能
+ *  当成本开关用，不能当质量判据。 */
+const RERANK_TRIGGER = 0.75
+
+/** v0.43 精排池大小：低置信时用低门槛重召回这么多条交给 cross-encoder。
+ *  量化模型单条 106ms，10 条 ≈ 1.06 秒；再大延迟就开始肉了（20 条要 2.1 秒）。
+ *  实测 20 条池子里真正相关的通常在前 10，后面的重排收益递减。 */
+const RERANK_POOL = 10
 import { collectDreamStates, headerOf, DreamStateBroadcast, type PersistedSessionLike } from './dream-signal.js'
 
 export const name = 'meow-memory'
@@ -328,6 +346,8 @@ export { CONFIG_DEFAULTS, factoryDefaultOf } from './defaults.js'
 /** v0.41.1：对外暴露向量侧的三个函数，供 scripts/migrate-embeddings.mjs 与诊断脚本使用。
  *  迁移脚本必须和增量写入用同一个 embeddingText，否则两类向量不同源。 */
 export { embed, embedMany, embeddingText, embeddingModelId, modelsDir, cosine } from './embedding.js'
+/** v0.43：精排侧同样对外暴露，供 scripts/verify-rerank.mjs 做完整链路验证。 */
+export { rerankScores, rerankUnavailable, warmupRerank } from './rerank.js'
 
 /** 单个时间点（suppressWindows 的 start/end）。 */
 const TIME_OF_DAY_RE = /^\d{1,2}:\d{2}$/
@@ -1505,6 +1525,63 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
    *
    * 返回 null：最近一步不是 wait / 这个 callId 已处理过 / 超时无消息。
    */
+  /**
+   * v0.43：混合召回 + 按需 cross-encoder 精排。
+   *
+   * 为什么不总是 rerank：实测 fp32 模型单条 231ms，20 条池子 = 4.6 秒，每条消息都付这个
+   * 代价不可接受。但统计发现**正常查询的混合分都很高**（15 条正样本全部 ≥0.40），只有
+   * 「说不清楚」的难句才低分。所以：
+   *   topScore >= RERANK_TRIGGER  → 已经确定，直接注入（0ms）
+   *   topScore <  RERANK_TRIGGER  → 低置信，花几百毫秒精排
+   * 日常场景零额外延迟，只有模糊问题才变慢。
+   *
+   * 实测收益（5 句难句）：相关条数 4.5 → 13.5。
+   */
+  const buildHitWithRerank = async (
+    db: ReturnType<typeof getDb>,
+    ws: string,
+    sid: string,
+    text: string,
+    opts: { hitTopK: number; titleMax: number; hitMinCoverage: number; hitDebug: boolean },
+    dir: string,
+    qv: Float32Array | null,
+  ): Promise<HitResult | null> => {
+    // 第一次：正常门槛，只用来看「置信度」（topScore）。
+    const probe = buildHitInjection(db, ws, sid, text, opts, dir, qv, /* skipCommit */ true)
+    if (probe === null) return null
+    const commit = (items: HitResult['candidates']): HitResult => {
+      commitHitInjection(db, ws, sid, items, dir)
+      return { text: formatHitBlock(items), injectedIds: items.map((c) => c.id), topScore: probe.topScore, candidates: items }
+    }
+    // 置信度足够 / 没有 rerank 模型 → 不精排，原样注入
+    if (probe.topScore >= RERANK_TRIGGER || rerankUnavailable()) {
+      return commit(probe.candidates)
+    }
+    // 低置信 → **用低门槛重召回一个大池子**再精排。
+    // 关键：门槛 0.40 对难句只剩 1-2 条候选，精排无从下手（实测 topScore 0.40~0.52 的几句
+    // 只有 1 条候选）。放宽到 0.15 能捞到 20 条，最终由 rerank 分数决定取谁，所以安全。
+    const wide = buildHitInjection(
+      db, ws, sid, text,
+      { ...opts, hybridMinScore: 0.15, hitTopK: RERANK_POOL },
+      dir, qv, /* skipCommit */ true,
+    )
+    if (wide === null || wide.candidates.length <= 1) return commit(probe.candidates)
+    const t0 = Date.now()
+    const scores = await rerankScores(text, wide.candidates.map((c) => c.content))
+    if (scores === null) return commit(probe.candidates)
+    const reranked = wide.candidates
+      .map((c, i) => ({ c, s: scores[i] ?? -99 }))
+      .sort((a, b) => b.s - a.s)
+      .slice(0, Math.max(1, opts.hitTopK))
+      .map((x) => x.c)
+    const ms = Date.now() - t0
+    try {
+      appendFileSync(join(ws, dir, 'dream-debug.log'),
+        `[${new Date().toISOString()}] rerank pid=${process.pid} sid=${shortSessionId(sid)} pool=${wide.candidates.length} top=${reranked.length} ${ms}ms\n`)
+    } catch { /* 日志失败不阻塞 */ }
+    return commit(reranked)
+  }
+
   const takeWaitToolText = (agent: any, sid: string): string | null => {
     try {
       const events = sessionEventsOf(agent?.session)
@@ -1593,7 +1670,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
         const db = getDb(ws, resolved.projectDir)
         // v0.41.0：先算查询向量（32ms），失败返回 null → 自动降级纯词面。
         const qv = await embed(waitText).catch(() => null)
-        const hit = buildHitInjection(db, ws, sid, waitText, {
+        const hit = await buildHitWithRerank(db, ws, sid, waitText, {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
@@ -1761,7 +1838,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       if (hitText !== null) {
         const db = getDb(ws, resolved.projectDir)
         const qv = await embed(hitText).catch(() => null)
-        const hit = buildHitInjection(db, ws, sid, hitText, {
+        const hit = await buildHitWithRerank(db, ws, sid, hitText, {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
