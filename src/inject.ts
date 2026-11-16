@@ -795,6 +795,8 @@ function hitQuery(
         id: h.id, level: h.level, content: row?.content ?? h.content,
         project: row?.project ?? null, updated_at: row?.updated_at ?? null,
         hybridScore: h.hybridScore ?? h.score ?? 0,
+        // v0.44 伪相关反馈要用 keywords 抽技术词种子（正文里同一个概念常常用口语写）
+        keywords: Array.isArray(row?.keywords) ? row.keywords : [],
       }
     })
 }
@@ -813,6 +815,8 @@ export interface HitCandidate {
   content: string
   project: string | null
   updated_at: number | null
+  /** 该条目的关键词（伪相关反馈从中抽技术词种子）。 */
+  keywords?: string[]
 }
 
 export interface HitResult {
@@ -821,6 +825,10 @@ export interface HitResult {
   /** 混合召回 top1 的总分（0-1）。调用方据此决定要不要补一次 cross-encoder 精排：
    *  分数高说明已经很确定，精排是浪费；难句才会低分。 */
   topScore: number
+  /** v0.44.1：这次实际走的是哪条路。**必须暴露**——`queryVec` 是可选的，忘了传就静默
+   *  退回纯词面，而纯词面下池子小、分数低，测试脚本会拿到一堆看似「算法不行」的假数据。
+   *  合作方就栽在这上面：五个测试脚本全忘了传第 7 个参数，得出一版全错的结论。 */
+  hybridMode: 'vec' | 'lex'
   /** 候选明细（已按混合分排序、已截断到 topK），rerank 后重排需要。 */
   candidates: HitCandidate[]
 }
@@ -873,6 +881,8 @@ export function buildHitInjection(
   if (fresh.length === 0) return null
   const candidates: HitCandidate[] = fresh.map((h) => ({
     id: h.id, level: h.level, content: h.content, project: h.project ?? null, updated_at: h.updated_at,
+    // v0.44：keywords 必须透传，伪相关反馈靠它抽技术词种子（漏掉这段会让 PRF 一个字都抽不出来）
+    keywords: (h as { keywords?: string[] }).keywords ?? [],
   }))
   const text = formatHitBlock(candidates)
   if (!skipCommit) commitHitInjection(db, workspace, sessionId, candidates, dir)
@@ -880,7 +890,11 @@ export function buildHitInjection(
   const topScore = (fresh[0] as { hybridScore?: number; score?: number }).hybridScore
     ?? (fresh[0] as { score?: number }).score
     ?? 0
-  return { text, injectedIds: candidates.map((h) => h.id), topScore, candidates }
+  return {
+    text, injectedIds: candidates.map((h) => h.id), topScore,
+    hybridMode: (queryVec !== null && o.hybrid !== false && !embeddingUnavailable()) ? 'vec' : 'lex',
+    candidates,
+  }
 }
 
 // 导出 tokenize 供索引/测试复用

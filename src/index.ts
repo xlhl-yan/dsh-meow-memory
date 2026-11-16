@@ -85,9 +85,17 @@ const FIRST_CREATE_NOTICE_SEEN_ID = '__firstCreateNotice__'
 const RERANK_TRIGGER = 0.75
 
 /** v0.43 精排池大小：低置信时用低门槛重召回这么多条交给 cross-encoder。
- *  量化模型单条 106ms，10 条 ≈ 1.06 秒；再大延迟就开始肉了（20 条要 2.1 秒）。
- *  实测 20 条池子里真正相关的通常在前 10，后面的重排收益递减。 */
-const RERANK_POOL = 10
+ *
+ *  v0.44.2 从 10 提到 20。理由（合作方 2026-11-16 提出，实测支持）：
+ *  他们发现「换场那一下最费劲」的正确答案（转场中间的片段）**纯向量排名第 11**，
+ *  正好被 pool=10 切在门外。而这两种损失的**性质不同**：
+ *    - 答案被切在池子外 → **确定性的**，永远拿不回来
+ *    - 捞进来但 rerank 分不开 → **概率性的**，至少还在候选里
+ *  「确定丢」比「可能排错」严重。
+ *
+ *  代价：精排从约 1.4 秒变成约 2.1 秒（量化模型单条 106ms）。只在 topScore < 0.75 时付，
+ *  不是每条消息都花这个钱。日志里的 `pool=` 字段可以观测真实池子大小。 */
+const RERANK_POOL = 20
 import { collectDreamStates, headerOf, DreamStateBroadcast, type PersistedSessionLike } from './dream-signal.js'
 
 export const name = 'meow-memory'
@@ -1574,11 +1582,38 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     // 低置信 → **用低门槛重召回一个大池子**再精排。
     // 关键：门槛 0.40 对难句只剩 1-2 条候选，精排无从下手（实测 topScore 0.40~0.52 的几句
     // 只有 1 条候选）。放宽到 0.15 能捞到 20 条，最终由 rerank 分数决定取谁，所以安全。
-    const wide = buildHitInjection(
-      db, ws, sid, text,
-      { ...opts, hybridMinScore: 0.15, hitTopK: RERANK_POOL },
-      dir, qv, /* skipCommit */ true,
-    )
+    const poolOpts = { ...opts, hybridMinScore: 0.15, hitTopK: RERANK_POOL }
+    let wide = buildHitInjection(db, ws, sid, text, poolOpts, dir, qv, /* skipCommit */ true)
+
+    // ── v0.44 伪相关反馈（**默认关闭**，实测不可行）──
+    // 三次尝试全部失败，原因见 src/prf.ts 头注释：
+    //   ① 按跨候选频次抽 → 一个字都抽不出来（keywords 一条一个说法，零重复）
+    //   ② 整条 keyword 当扩展词 → 稀释语义（「别那么肉」top5 反而更差）
+    //   ③ 只抽拉丁词片段 → 抽出 GB/GUI/prompt/style/include 这类通用词，毫无指向性
+    // 根因：这套记忆的 keywords 是「具体描述」不是「概念标签」
+    //（`要重跑只能租GPU` 而不是 `租GPU`；`19800积分总量不刷新` 而不是 `积分`）。
+    // 这是**记忆写入侧**的问题，检索侧修不了。代码保留，等 keywords 质量改善后再启用。
+    const PRF_ENABLED = false
+    let prfTerms: string[] = []
+    let prfMs = 0
+    if (PRF_ENABLED && wide !== null && wide.candidates.length >= 2) {
+      const tPrf = Date.now()
+      prfTerms = extractPrfTerms(wide.candidates, text)
+      if (prfTerms.length > 0) {
+        const expandedText = buildExpandedQuery(text, prfTerms)
+        const expandedVec = await embed(expandedText).catch(() => null)
+        const more = buildHitInjection(db, ws, sid, expandedText, poolOpts, dir, expandedVec, /* skipCommit */ true)
+        if (more !== null) {
+          const merged = new Map(wide.candidates.map((c) => [c.id, c]))
+          for (const c of more.candidates) {
+            if (!merged.has(c.id)) merged.set(c.id, c)
+          }
+          wide = { ...wide, candidates: [...merged.values()] }
+        }
+      }
+      prfMs = Date.now() - tPrf
+    }
+
     if (wide === null || wide.candidates.length <= 1) return commit(probe.candidates)
     const t0 = Date.now()
     const scores = await rerankScores(text, wide.candidates.map((c) => c.content))
@@ -1591,7 +1626,8 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     const ms = Date.now() - t0
     try {
       appendFileSync(join(ws, dir, 'dream-debug.log'),
-        `[${new Date().toISOString()}] rerank pid=${process.pid} sid=${shortSessionId(sid)} pool=${wide.candidates.length} top=${reranked.length} ${ms}ms\n`)
+        `[${new Date().toISOString()}] rerank pid=${process.pid} sid=${shortSessionId(sid)} pool=${wide.candidates.length}` +
+        ` prf=${prfTerms.length > 0 ? prfTerms.join(',') : '-'} prfMs=${prfMs} top=${reranked.length} ${ms}ms\n`)
     } catch { /* 日志失败不阻塞 */ }
     return commit(reranked)
   }
@@ -1692,7 +1728,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hybrid=${lastHitModeOf()} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hybrid=${lastHitModeOf()} top=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           // 工具轮没有 user 消息可前插，追加到末尾（下一步模型请求就能看到）。
@@ -1861,7 +1897,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hybrid=${lastHitModeOf()} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hybrid=${lastHitModeOf()} top=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           const rewritten = [...decision.messages]

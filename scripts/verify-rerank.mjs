@@ -10,7 +10,7 @@ import {
   rerankScores, rerankUnavailable, warmupRerank,
 } from '../lib/index.js';
 
-const RERANK_POOL = 10;
+const RERANK_POOL = 20;
 
 const WS = 'D:/AgentTools/qq-bridge/state/agents';
 const DIR = '.dsh-meow';
