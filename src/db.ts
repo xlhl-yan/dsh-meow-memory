@@ -387,6 +387,11 @@ export class MemoryDb {
     this.db.prepare('DELETE FROM embeddings WHERE id = ?').run(id)
   }
 
+  /** 清空某个模型的全部向量（喂料口径变化后全量重算，v0.41.1）。 */
+  deleteAllEmbeddings(model: string): void {
+    this.db.prepare('DELETE FROM embeddings WHERE model = ?').run(model)
+  }
+
   /** 列出「有记忆但没有该模型向量」的 id（迁移/补算用）。 */
   missingEmbeddingIds(model: string): string[] {
     const out: string[] = []

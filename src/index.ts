@@ -325,6 +325,10 @@ export const SETTINGS_NS = 'meow-memory'
  *  设置页 base（预填层）=出厂默认 + patch 基线，promptLang 刻意缺席=未设置语义。 */
 export { CONFIG_DEFAULTS, factoryDefaultOf } from './defaults.js'
 
+/** v0.41.1：对外暴露向量侧的三个函数，供 scripts/migrate-embeddings.mjs 与诊断脚本使用。
+ *  迁移脚本必须和增量写入用同一个 embeddingText，否则两类向量不同源。 */
+export { embed, embedMany, embeddingText, embeddingModelId, modelsDir, cosine } from './embedding.js'
+
 /** 单个时间点（suppressWindows 的 start/end）。 */
 const TIME_OF_DAY_RE = /^\d{1,2}:\d{2}$/
 

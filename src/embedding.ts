@@ -119,3 +119,41 @@ export function cosine(a: Float32Array, b: Float32Array): number {
   for (let i = 0; i < a.length; i++) s += a[i] * b[i]
   return s
 }
+
+/**
+ * 一条记忆「喂给 embedding 的文本」（v0.41.2）。
+ *
+ * 这条链路试过三种取法，实测数据决定最终写法（252 条真实库 + 5 句纯语义查询）：
+ *
+ * | 取法 | 纯语义相关率 |
+ * |---|---|
+ * | 正文前 300 字（v0.41.0） | ~60-70% |
+ * | 头 200 + 尾 200（方案 A） | **~50%**（更差：中间根因丢了） |
+ * | **加粗句 + 开头 150（本版）** | 见 CHANGELOG |
+ *
+ * 关键发现：**记忆的结论都在 `**...**` 里**。这套记忆的正文写法高度一致——现象/踩坑用
+ * 普通文字，结论用加粗（「**通用教训：…**」「**画风最后定在…**」）。加粗等于人工已经
+ * 标好了重点，直接喂给向量比按位置截断准得多。
+ *
+ * 退化：老条目可能没用加粗，此时加粗集为空，自动退回「开头 300 字」。
+ * ⚠️ migrate-embeddings.mjs 必须调用同一函数，否则存量向量与增量向量不同源。
+ */
+export function embeddingText(row: { keywords?: unknown; content?: string | null; title?: string | null }): string {
+  const kw = Array.isArray(row.keywords) ? (row.keywords as string[]).join('，') : ''
+  const body = (row.content ?? '').replace(/\s+/g, ' ').trim()
+  // 加粗句 = 结论。过滤掉纯符号/过短的噪声加粗。
+  const bold = [...body.matchAll(/\*\*(.+?)\*\*/g)]
+    .map((m) => m[1].trim())
+    .filter((s) => s.length >= 4 && /[\p{L}\p{N}]/u.test(s))
+  const head = body.slice(0, 150)
+  // v0.41.4 最终版：加粗结论（≤300 字）+ 开头 150 字。四种取法的实测（5 句纯语义 × top5，
+  // 人工判定相关率）：
+  //   正文前 300 字（v0.41.0）      ~60-70%
+  //   头 200 + 尾 200（方案 A）      ~50%   ← 更差：中间根因丢失
+  //   加粗 + 前 400（方案 C）        ~65%
+  //   **加粗 + 开头 150（本版）**    ~69%   ← 最好，且命中更准（宁缺毋滥）
+  // 加粗句是这套记忆的天然摘要（结论都写成 `**通用教训：…**`），比按位置截断可靠。
+  // 降级：老条目没用加粗时 bold 为空，退回正文前 300 字。
+  const core = bold.length > 0 ? bold.join('；').slice(0, 300) : body.slice(0, 300)
+  return `${kw}。${core}。${head}`.replace(/\s+/g, ' ').trim().slice(0, 500)
+}

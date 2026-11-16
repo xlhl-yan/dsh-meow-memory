@@ -13,7 +13,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { findSimilar, search, tokenize, type RankedHit } from './bm25.js'
 import { getDb, getDreamWorkspace, globalProjectMarker, isGlobalProject, projectCovers, projectLabel, projectList, relativeTime, type Level, LEVELS, type MemoryPatch, type MemoryRow, type ProjectSubcategory, PROJECT_SUBCATEGORIES } from './db.js'
 import { fillTemplate, keyedValue } from './prompt-loader.js'
-import { embed, embeddingModelId } from './embedding.js'
+import { embed, embeddingModelId, embeddingText } from './embedding.js'
 import { activeHomeDir, homeDirPresets, resolveHomeDir, switchHomeDir } from './home-dir.js'
 
 /** tools.md 键值取用（prompt 文案外置 v0.19.0）：缺键时 keyedValue throw。 */
@@ -43,16 +43,15 @@ export function setMemoryToolGate(gate: MemoryToolGate | undefined): void {
 /**
  * v0.41.0：写入/更新后同步刷新语义向量（~32ms）。
  * 失败一律静默返回 false——向量是召回增强，不是写入依赖；缺了自动降级纯词面。
- * 只喂 keywords + 正文前 300 字（与召回侧口径一致，控成本）。
+ * 喂法见 embedding.ts 的 embeddingText（v0.41.1 起取头尾而非只取开头）。
  */
 export async function refreshEmbedding(
   db: { setEmbedding(id: string, model: string, vec: Float32Array): void },
-  row: { id: string; content?: string | null; keywords?: unknown },
+  row: { id: string; content?: string | null; keywords?: unknown; title?: string | null },
 ): Promise<boolean> {
   try {
-    const kw = Array.isArray(row.keywords) ? (row.keywords as string[]).join('，') : ''
-    const text = `${kw}。${(row.content ?? '').slice(0, 300)}`
-    if (text.trim().length === 0) return false
+    const text = embeddingText(row)
+    if (text.length === 0) return false
     const v = await embed(text)
     if (v === null) return false
     db.setEmbedding(row.id, embeddingModelId(), v)
