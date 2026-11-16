@@ -52,6 +52,7 @@ import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPendi
 import { migrateLegacy } from './migrate.js'
 import { buildReflectMessage, consecutiveToolSteps, PLUGIN_SOURCE, REFLECT_MARKER, scanTurn } from './reflect.js'
 import { isMeowSource } from './source.js'
+import { embed } from './embedding.js'
 import { registerMemoryTools, setMemoryToolGate } from './tools.js'
 import { authGateLazy } from './auth-gate.js'
 import { resolveSlotText, setPromptLang } from './prompt-loader.js'
@@ -1586,12 +1587,14 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       if (waitText === null) return decision // 不是 wait 轮：保持原行为（工具轮不注入）
       try {
         const db = getDb(ws, resolved.projectDir)
+        // v0.41.0：先算查询向量（32ms），失败返回 null → 自动降级纯词面。
+        const qv = await embed(waitText).catch(() => null)
         const hit = buildHitInjection(db, ws, sid, waitText, {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
           hitDebug: resolved.hitDebug,
-        }, resolved.projectDir)
+        }, resolved.projectDir, qv)
         try {
           appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
@@ -1753,12 +1756,13 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const hitText = userText ?? waitText
       if (hitText !== null) {
         const db = getDb(ws, resolved.projectDir)
+        const qv = await embed(hitText).catch(() => null)
         const hit = buildHitInjection(db, ws, sid, hitText, {
           hitTopK: resolved.hitTopK,
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
           hitDebug: resolved.hitDebug,
-        }, resolved.projectDir)
+        }, resolved.projectDir, qv)
         try {
           appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }

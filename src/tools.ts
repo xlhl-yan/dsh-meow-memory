@@ -13,6 +13,7 @@ import { isAbsolute, resolve } from 'node:path'
 import { findSimilar, search, tokenize, type RankedHit } from './bm25.js'
 import { getDb, getDreamWorkspace, globalProjectMarker, isGlobalProject, projectCovers, projectLabel, projectList, relativeTime, type Level, LEVELS, type MemoryPatch, type MemoryRow, type ProjectSubcategory, PROJECT_SUBCATEGORIES } from './db.js'
 import { fillTemplate, keyedValue } from './prompt-loader.js'
+import { embed, embeddingModelId } from './embedding.js'
 import { activeHomeDir, homeDirPresets, resolveHomeDir, switchHomeDir } from './home-dir.js'
 
 /** tools.md 键值取用（prompt 文案外置 v0.19.0）：缺键时 keyedValue throw。 */
@@ -37,6 +38,28 @@ let toolGate: MemoryToolGate | undefined
 /** host 在 apply 时注入门控判定器（活配置闭包；随插件重载重建）。 */
 export function setMemoryToolGate(gate: MemoryToolGate | undefined): void {
   toolGate = gate
+}
+
+/**
+ * v0.41.0：写入/更新后同步刷新语义向量（~32ms）。
+ * 失败一律静默返回 false——向量是召回增强，不是写入依赖；缺了自动降级纯词面。
+ * 只喂 keywords + 正文前 300 字（与召回侧口径一致，控成本）。
+ */
+export async function refreshEmbedding(
+  db: { setEmbedding(id: string, model: string, vec: Float32Array): void },
+  row: { id: string; content?: string | null; keywords?: unknown },
+): Promise<boolean> {
+  try {
+    const kw = Array.isArray(row.keywords) ? (row.keywords as string[]).join('，') : ''
+    const text = `${kw}。${(row.content ?? '').slice(0, 300)}`
+    if (text.trim().length === 0) return false
+    const v = await embed(text)
+    if (v === null) return false
+    db.setEmbedding(row.id, embeddingModelId(), v)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 门控检查：拒绝时抛出带理由的 Error（工具错误的既有通道）。 */
@@ -323,6 +346,8 @@ function rememberTool(dir: string): ToolDefinition {
         keywords,
         source_session,
       })
+      // v0.41.0：写入即算向量（~32ms）。失败静默——没有向量就降级纯词面，不影响写入成功。
+      await refreshEmbedding(db, row)
       // 写痕迹（v0.23.0）：新建落库记入 written——压缩重注入第三块回放本会话写过的记忆。
       markWritten(workspace, source_session ?? 'unknown', [row.id], dir)
       return {
@@ -800,6 +825,12 @@ function updateTool(dir: string): ToolDefinition {
       // 记忆时间戳 = 最后更新时间：db.update 内部自动刷新 updated_at（任何 update 都刷新）。
       // patch 为空（如只想传 keywords:[] 表达"不更新"）→ 视为调用成功、无字段变化。
       const ok = Object.keys(patch).length > 0 ? db.update(found.level, found.row.id, patch) : true
+      // v0.41.0：只有「向量输入」变了才重算——改 status/project/importance 不碰向量。
+      // 实测：RSS 里 update 的绝大多数是归档（改 status），重算纯属浪费。
+      if (ok && (patch.content !== undefined || patch.keywords !== undefined || patch.title !== undefined)) {
+        const fresh = db.findById(found.row.id)
+        if (fresh) await refreshEmbedding(db, fresh.row)
+      }
       // 写痕迹（v0.23.0）：实际落库（patch 非空且 update 成功）才记——空 patch 无字段变化不算写。
       if (ok && Object.keys(patch).length > 0) markWritten(workspace, sessionId ?? 'unknown', [found.row.id], dir)
       return { ok, id: found.row.id, level: found.level }

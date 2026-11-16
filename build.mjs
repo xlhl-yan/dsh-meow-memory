@@ -31,7 +31,11 @@ const hostOptions = {
   // optional dsh-llm peer is absent during a clean GitHub prepare build.
   // Do not restore it as a devDependency: file/link installs can introduce
   // another copy of a host core package into the profile (see #84).
-  external: ['@deepseek-ai/schemastery', '@deepseek-ai/dsh-llm'],
+  external: ['@deepseek-ai/schemastery', '@deepseek-ai/dsh-llm',
+    // v0.41.0 语义向量：含 onnxruntime 原生二进制（几十 MB），打进 bundle 没意义也会拖慢
+    // 加载。运行时由 node 从 node_modules 解析；缺失时 embedding.ts 动态 import 失败 →
+    // 自动降级纯词面，不会让插件挂掉。
+    '@xenova/transformers', '@xenova/transformers/*'],
   format: 'esm',
   target: 'node22',
   nodePaths,

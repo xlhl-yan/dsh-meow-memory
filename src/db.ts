@@ -246,6 +246,16 @@ export class MemoryDb {
     // 实测探针）。WAL 下自旋等待 5s，绝大多数瞬时争用直接消失；超时仍抛由上层兜底。
     this.db.exec('PRAGMA busy_timeout = 5000')
     for (const level of LEVELS) this.db.exec(SCHEMAS[level])
+    // v0.41.0：语义向量表（混合召回用）。**独立表，不动七层表结构**——旧库升级只是多一张
+    // 空表，没算过向量的条目自动降级回纯词面。
+    this.db.exec(`CREATE TABLE IF NOT EXISTS embeddings (
+      id TEXT PRIMARY KEY,
+      model TEXT NOT NULL,
+      dim INTEGER NOT NULL,
+      vec BLOB NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`)
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model)')
     this.db.exec(`CREATE TABLE IF NOT EXISTS dream_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_at INTEGER NOT NULL,
@@ -346,6 +356,54 @@ export class MemoryDb {
    *  WAL 下安全：快照含 WAL 内容，读连接一致性由 SQLite 保证。 */
   vacuumInto(target: string): void {
     this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`)
+  }
+
+  // ── v0.41.0 语义向量（混合召回）────────────────────────────────────────────
+
+  /** 读取某个模型下的全部向量（id → Float32Array）。库很大时也只解一次，调用方可缓存。 */
+  loadEmbeddings(model: string): Map<string, Float32Array> {
+    const out = new Map<string, Float32Array>()
+    const rows = this.db.prepare('SELECT id, dim, vec FROM embeddings WHERE model = ?').all(model) as Array<{ id: string; dim: number; vec: Uint8Array }>
+    for (const r of rows) {
+      const buf = r.vec
+      // 必须按字节偏移复制：node:sqlite 给的 Buffer 可能带 byteOffset，直接 new Float32Array(buf.buffer) 会读错位。
+      const copy = new Uint8Array(buf.byteLength)
+      copy.set(buf)
+      out.set(r.id, new Float32Array(copy.buffer, 0, Math.floor(copy.byteLength / 4)))
+    }
+    return out
+  }
+
+  /** 写入/覆盖一条向量（同 id 同模型 upsert）。 */
+  setEmbedding(id: string, model: string, vec: Float32Array): void {
+    const buf = Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength)
+    this.db.prepare(
+      'INSERT INTO embeddings (id, model, dim, vec, updated_at) VALUES (?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(id) DO UPDATE SET model = excluded.model, dim = excluded.dim, vec = excluded.vec, updated_at = excluded.updated_at',
+    ).run(id, model, vec.length, buf, Date.now())
+  }
+
+  deleteEmbedding(id: string): void {
+    this.db.prepare('DELETE FROM embeddings WHERE id = ?').run(id)
+  }
+
+  /** 列出「有记忆但没有该模型向量」的 id（迁移/补算用）。 */
+  missingEmbeddingIds(model: string): string[] {
+    const out: string[] = []
+    for (const level of LEVELS) {
+      const rows = this.db.prepare(
+        `SELECT t.id FROM ${level} t LEFT JOIN embeddings e ON e.id = t.id AND e.model = ? ` +
+        `WHERE t.status = 'active' AND e.id IS NULL`,
+      ).all(model) as Array<{ id: string }>
+      for (const r of rows) out.push(r.id)
+    }
+    return out
+  }
+
+  /** 向量表统计（迁移进度/诊断）。 */
+  embeddingStats(model: string): { total: number; dim: number | null } {
+    const r = this.db.prepare('SELECT COUNT(*) AS n, MAX(dim) AS d FROM embeddings WHERE model = ?').get(model) as { n: number; d: number | null }
+    return { total: r.n, dim: r.d }
   }
 
   insert(row: { level: Level; content: string } & Partial<MemoryRow>): MemoryRow {

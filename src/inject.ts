@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Doc } from './bm25.js'
 import { keywordHitScore, search, tokenize } from './bm25.js'
+import { cosine, embeddingModelId, embeddingUnavailable } from './embedding.js'
 import { isGlobalProject, isGlobalScope, memoryDbPath, projectCovers, projectLabel, projectList, relativeTime, PROJECT_SUBCATEGORIES, type MemoryDb, type MemoryRow, type ProjectSubcategory } from './db.js'
 import { fillTemplate, keyedValue } from './prompt-loader.js'
 
@@ -28,9 +29,12 @@ export interface InjectOptions {
   /** 命中诊断日志（默认 false）：每次命中判定（含 0 条）都打一行，排查「怎么从来不命中」用。
    *  不进设置页表单——它是排查工具不是日常开关（需求方拍板 2026-11-13）。 */
   hitDebug: boolean
+  /** 混合召回开关（v0.41.0，默认 true）：关掉退回纯词面（v0.40 行为），用于排查
+   *  「是向量在捣乱还是词面本来就不行」。 */
+  hybrid?: boolean
 }
 
-const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 0.15, hitDebug: false }
+const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 0.15, hitDebug: false, hybrid: true }
 
 /** 命中查询的文本上限：从用户消息里取这么多字符做关键词匹配。
  *  旧值是 500——桥接/预设会在真实内容前拼大段说明模板，500 字常常只覆盖到模板，
@@ -51,6 +55,24 @@ export const MIN_HIT_COUNT = 2
  *  「那台/配置」而没有任何一条记忆同时含这两个词）——这两条就这样全灭。改看「命中的词
  *  够不够有信息量」：「甩镜」idfSum 3.77 放行。 */
 export const MIN_IDF_SUM = 2.0
+
+// ── v0.41.0 混合召回权重与门槛 ──────────────────────────────────────────────
+// 词面 0.45 + 向量 0.55：词面保住专有名词/数字的精确匹配（`3081`、`48GB` 这类词向量会糊），
+// 向量补上「字面不重合但语义相关」。实测（252 条真实库 + 15 条测试集）：
+//   纯词面 68% / 纯向量 74% / 混合 80%，且混合保住 top1 命中 10/10、负样本误命中 2/5→1/5。
+export const HYBRID_W_LEX = 0.45
+export const HYBRID_W_VEC = 0.55
+/** 混合总分门槛：0.45×词面 + 0.55×向量归一化。
+ *  0.40 而不是 0.30：BGE 对「任意两句中文」都给出 ~0.5 的基线余弦，闲聊句（「我有点困了」
+ *  top1=0.577）和技术问句（「甩镜怎么做」top1=0.616）几乎重叠——单靠 sim 分不开。
+ *  但负样本有一个共同点：**词面命中 0，是纯向量命中**。0.30 时闲聊的
+ *  0.55×(0.577-0.30)/0.45 = 0.339 刚好过线；0.40 挡住它，而有词面支撑的正样本
+ *  （cov 0.5 + sim 0.6 → 0.594）绰绰有余。 */
+export const HYBRID_MIN_SCORE = 0.40
+/** 纯向量候选（词面完全没撞上）的最低余弦：低于它认为只是泛泛相关。 */
+export const HYBRID_VEC_MIN_SIM = 0.45
+/** 查询向量是否参与召回（关掉即退回 v0.40 的纯词面行为）。 */
+export const HYBRID_ENABLED_DEFAULT = true
 
 /** 单命中的「强覆盖」例外阈值（v0.37.0）：只命中 1 个 token，但它覆盖了查询一半以上
  *  的信息量时仍然放行（「画风定成什么了」→ 只中「画风」，cov 0.55）。 */
@@ -629,6 +651,8 @@ function hitQuery(
   userText: string,
   o: InjectOptions,
   dir: string,
+  /** v0.41.0：查询向量（调用方预先算好，32ms）。null = 走纯词面（降级路径）。 */
+  queryVec: Float32Array | null = null,
 ): Array<{ id: string; level: string; content: string; updated_at: number | null }> {
   const seenState = readSeenFile(workspace, sessionId, dir)
   const currentProject = seenState.currentProject
@@ -658,8 +682,10 @@ function hitQuery(
     content: d.keywords.length > 0 ? d.keywords.join(' ') : d.content.slice(0, 100),
   }))
   // k 传候选池全量：门槛过滤与降权都在本层做，先截断会丢掉本该进榜的条目。
-  // maxDfRatio 0.05（v0.37.0，原 0.08）：decisions 里 5% 的条目都含有的词已经不算有区分度。
-  const hits = keywordHitScore(query, docs, { k: hitRows.length, maxDfRatio: 0.05 })
+  // maxDfRatio 0.08（2026-11-16 实测回滚）：0.05 在 250 条 active 上阈值是 12，
+  // 「AutoDL」出现在 13 条记忆的关键词里 → 13 > 12 被切掉 → 「AutoDL 什么配置」一条都中不了。
+  // 0.08 阈值是 20：AutoDL 13 < 20 放行，「视频」23 > 20 切掉，正好卡在「项目核心词」和「纯万金油」之间。
+  const hits = keywordHitScore(query, docs, { k: hitRows.length, maxDfRatio: 0.08 })
   // 覆盖率门槛按条目长度分档：长条目要求命中比例高（防"通用词一碰就整条注入"），
   // 短条目放宽（分母太小，比例天然偏高/偏低）。hitMinCoverage=0 时整档关闭。
   // 长度用去重 token 数，与 bm25 里 coverage 的分母保持同一口径。
@@ -683,10 +709,44 @@ function hitQuery(
   // （试过「查询有效词 <=2 就放宽」，负样本掉到 5/10，因为大多数短查询都符合；按命中词性质
   //  判断才准。）
   const minHc = MIN_HIT_COUNT
-  const kept = hits.filter((h) => {
-    if ((h.coverage ?? 0) < thresholdOf(h.id)) return false
-    return (h.hitCount ?? 0) >= minHc || h.properHit === true || (h.idfSum ?? 0) >= MIN_IDF_SUM
-  })
+  // ── v0.41.0 混合召回 ──
+  // 词面命中 ∪ 向量命中，按 0.45×词面 + 0.55×向量 融合。词面命中要求 hc/专有名词/IDF 的
+  // 那套门槛只保留在**降级路径**（没有向量时），混合模式下由总分门槛统一裁决——
+  // 否则「字面不重合但语义很近」的条目会被 hc>=2 一票否决，向量就白算了。
+  let vecSim: Map<string, number> | null = null
+  if (queryVec !== null && o.hybrid !== false && !embeddingUnavailable()) {
+    const stored = db.loadEmbeddings(embeddingModelId())
+    if (stored.size > 0) {
+      vecSim = new Map()
+      for (const [id, v] of stored) vecSim.set(id, cosine(queryVec, v))
+    }
+  }
+  const hybrid = vecSim !== null
+  /** 向量余弦映射到 0-1：BGE 中文实测相关区间约 0.45-0.85，0.30 起步、0.75 封顶。 */
+  const vecNorm = (sim: number): number => Math.max(0, Math.min(1, (sim - 0.30) / 0.45))
+  const scoreOf = (h: { id: string; coverage?: number }): number => {
+    const lex = h.coverage ?? 0
+    if (!hybrid) return lex
+    return HYBRID_W_LEX * lex + HYBRID_W_VEC * vecNorm(vecSim.get(h.id) ?? 0)
+  }
+  const rowById = new Map(hitRows.map((r) => [r.id, r]))
+  const pool = new Map<string, (typeof hits)[number]>(hits.map((h) => [h.id, h]))
+  if (hybrid) {
+    // 词面完全没撞上、但语义够近的条目也要进候选池。
+    for (const [id, sim] of vecSim) {
+      if (!pool.has(id) && rowById.has(id) && sim >= HYBRID_VEC_MIN_SIM) {
+        const r = rowById.get(id)!
+        pool.set(id, { id, level: r.level, content: '', score: 0, coverage: 0, hitCount: 0 } as (typeof hits)[number])
+      }
+    }
+  }
+  const kept = [...pool.values()]
+    .map((h) => ({ ...h, hybridScore: scoreOf(h) }))
+    .filter((h) => {
+      if (hybrid) return h.hybridScore >= HYBRID_MIN_SCORE
+      if ((h.coverage ?? 0) < thresholdOf(h.id)) return false
+      return (h.hitCount ?? 0) >= minHc || h.properHit === true || (h.idfSum ?? 0) >= MIN_IDF_SUM
+    })
   // 命中诊断（需求方要求：没命中也要打，带最高 coverage + 被拒原因，否则只能瞎猜）。
   if (o.hitDebug && hitDebugLogger !== null) {
     const qTokens = [...new Set(tokenize(query).filter((t) => t.length >= 2))]
@@ -705,7 +765,7 @@ function hitQuery(
   // 展示/注入用原文 content（docs 的 content 只是 keywords 匹配面，不能当正文）。
   return kept
     .map((h) => ({ h, weight: (inScope.get(h.id) ? 1 : 0.7) * (isSelf.get(h.id) ? 0.7 : 1) }))
-    .sort((a, b) => b.h.score * b.weight - a.h.score * a.weight)
+    .sort((a, b) => (b.h.hybridScore ?? b.h.score) * b.weight - (a.h.hybridScore ?? a.h.score) * a.weight)
     .slice(0, Math.max(0, o.hitTopK))
     .map(({ h }) => {
       const row = byId.get(h.id)
@@ -728,9 +788,11 @@ export function buildHitInjection(
   userText: string,
   opts: Partial<InjectOptions> = {},
   dir = '.dsh-meow',
+  /** v0.41.0：调用方（async）预算好的查询向量；null/省略 = 纯词面。 */
+  queryVec: Float32Array | null = null,
 ): { text: string; injectedIds: string[] } | null {
   const o = { ...DEFAULT_OPTS, ...opts }
-  const fresh = hitQuery(db, workspace, sessionId, userText, o, dir)
+  const fresh = hitQuery(db, workspace, sessionId, userText, o, dir, queryVec)
   if (fresh.length === 0) return null
   const lines = [keyedValue('labels', 'inject.hitHeader')]
   for (const h of fresh) {

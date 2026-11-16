@@ -13,3 +13,6 @@ mytrashbin/
 /.pr-body.md
 /.pr-body-*.md
 /storage/
+
+# v0.41.0 语义向量模型（22.9MB 起，按需下载，不进仓库）
+models/
