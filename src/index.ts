@@ -48,7 +48,7 @@ import {
   shortSessionId,
   type DreamConfig,
 } from './dream.js'
-import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, isReinjectPending, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen, setHitDebugLogger } from './inject.js'
+import { buildHitInjection, buildInjection, buildReinjection, clearReinjectPending, isReinjectPending, lastHitModeOf, markAccessed, markReinjectPending, markSearched, readProjectQueried, readSeen, readInjected, releaseSeen, setHitDebugLogger } from './inject.js'
 import { migrateLegacy } from './migrate.js'
 import { buildReflectMessage, consecutiveToolSteps, PLUGIN_SOURCE, REFLECT_MARKER, scanTurn } from './reflect.js'
 import { isMeowSource } from './source.js'
@@ -1596,7 +1596,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hybrid=${lastHitModeOf()} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           // 工具轮没有 user 消息可前插，追加到末尾（下一步模型请求就能看到）。
@@ -1764,7 +1764,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hybrid=${lastHitModeOf()} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           const rewritten = [...decision.messages]

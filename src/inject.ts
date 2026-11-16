@@ -74,6 +74,14 @@ export const HYBRID_VEC_MIN_SIM = 0.45
 /** 查询向量是否参与召回（关掉即退回 v0.40 的纯词面行为）。 */
 export const HYBRID_ENABLED_DEFAULT = true
 
+/** 上一次命中实际走的路径：`vec`=混合（向量参与）/ `lex`=纯词面（降级）。
+ *  给 hit-chain 日志用——光看注入结果分不出「向量没生效」和「向量生效但没命中」，
+ *  排查时必须能一眼看出走的哪条路。多会话并发时可能被覆盖，日志用途可接受。 */
+let lastHitMode: 'vec' | 'lex' = 'lex'
+export function lastHitModeOf(): 'vec' | 'lex' {
+  return lastHitMode
+}
+
 /** 单命中的「强覆盖」例外阈值（v0.37.0）：只命中 1 个 token，但它覆盖了查询一半以上
  *  的信息量时仍然放行（「画风定成什么了」→ 只中「画风」，cov 0.55）。 */
 export const STRONG_COVERAGE = 0.5
@@ -722,6 +730,7 @@ function hitQuery(
     }
   }
   const hybrid = vecSim !== null
+  lastHitMode = hybrid ? 'vec' : 'lex'
   /** 向量余弦映射到 0-1：BGE 中文实测相关区间约 0.45-0.85，0.30 起步、0.75 封顶。 */
   const vecNorm = (sim: number): number => Math.max(0, Math.min(1, (sim - 0.30) / 0.45))
   const scoreOf = (h: { id: string; coverage?: number }): number => {
