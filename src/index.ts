@@ -1627,7 +1627,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     try {
       appendFileSync(join(ws, dir, 'dream-debug.log'),
         `[${new Date().toISOString()}] rerank pid=${process.pid} sid=${shortSessionId(sid)} pool=${wide.candidates.length}` +
-        ` prf=${prfTerms.length > 0 ? prfTerms.join(',') : '-'} prfMs=${prfMs} top=${reranked.length} ${ms}ms\n`)
+        ` prf=${prfTerms.length > 0 ? prfTerms.join(',') : '-'} prfMs=${prfMs} kept=${reranked.length} ${ms}ms\n`)
     } catch { /* 日志失败不阻塞 */ }
     return commit(reranked)
   }
@@ -1728,7 +1728,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hybrid=${lastHitModeOf()} top=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=wait textLen=${waitText.length} hybrid=${lastHitModeOf()} topScore=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           // 工具轮没有 user 消息可前插，追加到末尾（下一步模型请求就能看到）。
@@ -1897,7 +1897,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
-          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hybrid=${lastHitModeOf()} top=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
+          appendFileSync(join(ws, resolved.projectDir, 'dream-debug.log'), `[${new Date().toISOString()}] hit-chain pid=${process.pid} sid=${shortSessionId(sid)} via=${waitText === null ? 'user' : 'wait'} textLen=${hitText.length} hybrid=${lastHitModeOf()} topScore=${hit === null ? `-` : hit.topScore.toFixed(2)} hit=${hit === null ? 'null' : 'yes'}\n`)
         } catch { /* 日志失败不阻塞 */ }
         if (hit !== null) {
           const rewritten = [...decision.messages]
