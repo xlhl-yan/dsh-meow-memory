@@ -337,6 +337,14 @@ const config = z.object({
       /** 反思/梦境轮换用模型：留空 = 全程主模型；'provider/model'（dsh route 格式）
        *  指定 provider+model，'model' 只换 model（provider 继承主会话）。 */
       model: z.string().required(false),
+      /** 换用模型的思考档位：留空 = 剥离（用目标模型默认档位）、'inherit' = 沿用主会话
+       *  当前档位、或显式档位名（low / medium / high 等，取决于目标模型支持哪些）。
+       *
+       *  ⚠️ **这个字段 v0.45.2 之前漏在 schema 里**：前端有输入框、后端有读取和使用逻辑
+       *  （`resolved.delegate.effort` → `agent.model.select({ reasoningEffort })`），
+       *  但 zod 没声明它 → DSH 保存设置时按 schema 剥离 → **改了点保存就消失**。
+       *  表现为「思考档位改不动」，实际是保存阶段被丢掉。 */
+      effort: z.string().required(false),
     })
     .default({}),
 })
