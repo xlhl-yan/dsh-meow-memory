@@ -2628,6 +2628,27 @@ check('parseModelSpec blank → undefined', parseModelSpec('') === undefined && 
     await callPre(h, makeAgent('s-m4', picked), undefined)
     check('v0.45.4 pre-step: messages 缺省时安全', picked.length === 0, JSON.stringify(picked))
   }
+
+  // ⑤ 端到端：覆盖 → 下一轮普通请求必须还原（v0.45.5，锁住「切了回不来」这条主链路）
+  {
+    const h = await setupPre()
+    const sid = 's-e2e'
+    // 同一个 agent：select 会把选择写进 session 事件（模拟 dsh-agent 的 append 行为）
+    const log = [events.turnStart()]
+    const picked = []
+    const agent = {
+      session: { header: { cwd: ws, id: sid }, events: log },
+      model: { select: (s) => { picked.push(s); log.push({ type: 'model/selection', data: { provider: s.provider, model: s.model } }) } },
+    }
+    const step = (msgs, modelSel) => h({ agent, messages: msgs, modelSelection: modelSel, turn: 1, step: 1, signal: sig }, async () => ({ kind: 'proceed', messages: [] }))
+    // 第 1 步：dream 轮 → 覆盖成 prov/main
+    await step([{ role: 'user', content: [{ type: 'text', text: '[meow-memory-dream] 记忆整理' }] }], { provider: 'base', model: 'base-model' })
+    check('v0.45.5 e2e: dream 轮覆盖成功', picked.length === 1 && picked[0].model === 'main', JSON.stringify(picked))
+    // 第 2 步：普通轮（无标记），宿主此时解析出的模型就是被覆盖后的 prov/main
+    log.push(events.turnStart())
+    await step([{ role: 'user', content: [{ type: 'text', text: '帮我看看这个 bug' }] }], { provider: 'prov', model: 'main' })
+    check('v0.45.5 e2e: 普通轮还原主模型', picked.length === 2 && picked[1].provider === 'base' && picked[1].model === 'base-model', JSON.stringify(picked))
+  }
 }
 
 // isMemoryTaskTurn 单元：跨 turn 边界（marker 只认当前 turn，上一轮的 marker 不残留）

@@ -2126,6 +2126,16 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
         // +1 = 我们这次 select() 即将 append 的那条（dsh-agent/lib/index.js:198）
         rememberOverride(sid, mainRouteOf(sel ?? {}), route, countModelSelections(events) + 1)
         ctx.logger.info(`meow-memory: memory task turn → model override ${route.provider}/${route.model}${delegateEffort === undefined ? ' (effort stripped)' : ` (effort ${delegateEffort})`}`)
+        // v0.45.5 诊断：与下方 delegate-restore 配对，能看出「覆盖有没有记上、记的主模型对不对」
+        try {
+          const cwd = agent?.session?.header?.cwd
+          if (typeof cwd === 'string' && cwd.length > 0) {
+            appendFileSync(join(cwd, resolved.projectDir, 'dream-debug.log'),
+              `[${new Date().toISOString()}] delegate-override pid=${process.pid} sid=${shortSessionId(sid)}` +
+              ` route=${route.provider}/${route.model} main=${(sel ?? {}).provider ?? '?'}/${(sel ?? {}).model ?? '?'}` +
+              ` selCount=${countModelSelections(events) + 1} effort=${delegateEffort ?? 'stripped'}\n`)
+          }
+        } catch { /* 日志失败不影响主流程 */ }
         // #98 effort 语义映射到 select：strip=缺省（0.2.2 文档：omitted effort follows
         // adapter defaults，天然=剥离）；inherit=传主模型当前 effort；显式值原样传。
         ;(agent as unknown as { model: { select: (s: ModelRoute) => void } }).model.select(
@@ -2140,14 +2150,29 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const remembered = delegateRestore.get(sid)
       if (remembered === undefined) return next() // 没覆盖过 / 已还原：零开销放行
       delegateRestore.delete(sid)
+      // v0.45.5 诊断：delegate 决策写文件（ctx.logger 只进控制台，真机看不到）。
+      // 排查「切过去了但切不回来」时，这几行能直接指出是哪条判断把它拦下的。
+      const restoreLog = (verdict: string): void => {
+        try {
+          const cwd = agent?.session?.header?.cwd
+          if (typeof cwd !== 'string' || cwd.length === 0) return
+          appendFileSync(join(cwd, resolved.projectDir, 'dream-debug.log'),
+            `[${new Date().toISOString()}] delegate-restore pid=${process.pid} sid=${shortSessionId(sid)} verdict=${verdict}` +
+            ` sel=${sel === undefined ? 'undefined' : `${sel.provider}/${sel.model}`}` +
+            ` route=${remembered.route.provider}/${remembered.route.model}` +
+            ` main=${remembered.main.provider}/${remembered.main.model}` +
+            ` selCount=${countModelSelections(events)}/${remembered.selCount}\n`)
+        } catch { /* 日志失败不影响主流程 */ }
+      }
       // v0.45.3：用「model/selection 条数增量」判断期间有没有人又选过。
       // 覆盖时记的是 count+1（含我们自己 append 的那条），所以：
       //   现在 > 记录值  → 期间多了选择（用户亲手选，或别的插件）→ 尊重它，放行
       //   现在 == 记录值 → 没人动过，模型是被我们覆盖成 delegate 的 → 还原
       // 为什么不能再用「撞到 model/selection 就算用户选的」：插件自己 select() 也会 append，
       // 那条会永远被误判成用户选择，导致永不还原（v0.45.2 之前的真实故障）。
-      if (countModelSelections(events) > remembered.selCount) return next()
-      if (sel?.provider !== remembered.route.provider || sel?.model !== remembered.route.model) return next() // 用户换了别的模型：放行
+      if (countModelSelections(events) > remembered.selCount) { restoreLog('skip-selcount'); return next() }
+      if (sel?.provider !== remembered.route.provider || sel?.model !== remembered.route.model) { restoreLog('skip-sel-mismatch'); return next() } // 用户换了别的模型：放行
+      restoreLog('restore')
       ctx.logger.info(`meow-memory: restore main model ${remembered.main.provider}/${remembered.main.model} after memory task turn`)
       ;(agent as unknown as { model: { select: (s: ModelRoute) => void } }).model.select({
         provider: remembered.main.provider,
