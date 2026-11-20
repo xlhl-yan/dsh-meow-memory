@@ -2575,6 +2575,61 @@ check('parseModelSpec blank → undefined', parseModelSpec('') === undefined && 
   check('#71 subagent request untouched by restore', out4.provider === 'base' && out4.model === 'base-model')
 }
 
+// v0.45.4：agent/pre-step 阶段本轮的指令消息还没落 session（宿主顺序 pre-step → append
+// user/message → buildRequest），所以查 events 恒为 false、delegate 覆盖从未触发过。
+// 必须靠 payload.messages 判定。这组用例锁住该行为。
+{
+  const sig = new AbortController().signal
+  const setupPre = async () => {
+    const d = makeCtx()
+    await apply(d.ctx, { enabled: true, projectDir: '.dsh-meow', promptLang: 'zh', delegate: { model: 'prov/main' } })
+    return d.handlers['agent/pre-step']
+  }
+  // 新宿主：agent.model.select 是可用的函数（走 pre-step 覆盖路径），记录被 select 的 route
+  const makeAgent = (sid, picked) => {
+    const session = { header: { cwd: ws, id: sid }, events: [events.turnStart()] }
+    return {
+      session,
+      model: { select: (s) => { picked.push(s) } },
+    }
+  }
+  const callPre = (handler, agent, messages) => handler(
+    { agent, messages, modelSelection: { provider: 'base', model: 'base-model' }, turn: 1, step: 1, signal: sig },
+    async () => ({ kind: 'proceed', messages: [] }),
+  )
+
+  // ① events 里没有标记，但 messages 里有 → 必须覆盖（这就是真机故障的场景）
+  {
+    const h = await setupPre()
+    const picked = []
+    await callPre(h, makeAgent('s-m1', picked), [
+      { role: 'user', content: [{ type: 'text', text: '[meow-memory-dream] 记忆整理任务（dream）' }] },
+    ])
+    check('v0.45.4 pre-step: messages 里的 dream 标记触发覆盖', picked.length === 1 && picked[0].model === 'main', JSON.stringify(picked))
+  }
+  // ② messages 里也只有普通对话 → 不覆盖
+  {
+    const h = await setupPre()
+    const picked = []
+    await callPre(h, makeAgent('s-m2', picked), [{ role: 'user', content: [{ type: 'text', text: '帮我看看这个 bug' }] }])
+    check('v0.45.4 pre-step: 普通消息不覆盖', picked.length === 0, JSON.stringify(picked))
+  }
+  // ③ 字符串形式的 content 也要能识别
+  {
+    const h = await setupPre()
+    const picked = []
+    await callPre(h, makeAgent('s-m3', picked), [{ role: 'user', content: '[meow-memory-reflect] 反思任务' }])
+    check('v0.45.4 pre-step: 字符串 content 也能识别标记', picked.length === 1, JSON.stringify(picked))
+  }
+  // ④ messages 缺省（老宿主）→ 不崩、不覆盖
+  {
+    const h = await setupPre()
+    const picked = []
+    await callPre(h, makeAgent('s-m4', picked), undefined)
+    check('v0.45.4 pre-step: messages 缺省时安全', picked.length === 0, JSON.stringify(picked))
+  }
+}
+
 // isMemoryTaskTurn 单元：跨 turn 边界（marker 只认当前 turn，上一轮的 marker 不残留）
 {
   const { isMemoryTaskTurn } = await import('./lib/index.js')

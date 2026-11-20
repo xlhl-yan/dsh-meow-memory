@@ -625,12 +625,18 @@ function wasDreamTurn(events: readonly unknown[]): boolean {
 
 /**
  * 当前 turn 是否为 meow-memory 的反思/梦境轮（换模型覆盖判定，agent/request 用）。
+ *
+ * ⚠️ **只查事件流在 agent/pre-step 里是不够的**（v0.45.4 实测）：宿主顺序是
+ *   `turn/start → step/start → agent/pre-step → append user/message → buildRequest`
+ * 即 **pre-step 执行时本轮的指令消息还没落 log**，因此这个函数在 pre-step 阶段恒为 false，
+ * 模型覆盖从来没触发过（现象：配了 delegate.model 但日志里没有 model override，模型也不切）。
+ * pre-step 分支必须配合 {@link hasMemoryMarkerInMessages} 查 payload.messages。
+ *
+ * 本函数仍用于 `agent/request` waterfall（旧宿主）：那时消息已落盘，事件流判定有效。
+ *
  * 判定口径与事件链的插件消息识别一致：最后一个 turn/start 之后的 user/message 帧，
  * source.kind !== 'user'（用户亲手发的消息绝不判 marker，防引用标记文本误伤）且
- * 文本含 [meow-memory-reflect] / [meow-memory-dream]。steer 指令消息在请求发出前
- * 已落 log（agent-loop：pre-step decision → append user/message → step/buildRequest），
- * 因此请求时判定读到的数据完备；轮次结束不再 steer，下个 turn 无 marker → 自动
- * 换回主模型，无需任何状态清理。
+ * 文本含 [meow-memory-reflect] / [meow-memory-dream]。
  */
 export function isMemoryTaskTurn(events: readonly unknown[]): boolean {
   let startIdx = -1
@@ -650,6 +656,29 @@ export function isMemoryTaskTurn(events: readonly unknown[]): boolean {
       .map((b) => b.text ?? '')
       .join(' ')
     if (text.includes(REFLECT_MARKER) || text.includes(DREAM_MARKER)) return true
+  }
+  return false
+}
+
+/** v0.45.4：从 `agent/pre-step` 的 `payload.messages` 里找记忆任务标记。
+ *
+ *  为什么需要它：pre-step 执行时本轮的指令消息**还没 append 到 session**（宿主的顺序是
+ *  `pre-step → append user/message → buildRequest`），所以查 events 永远查不到。
+ *  而 payload.messages 是「本步将要发给模型的消息」，已经包含刚注入的 dream/reflect 指令。
+ *
+ *  误判风险：`Message` 结构里没有 `source.kind`，无法像事件流那样排除「用户亲手发的消息」。
+ *  但只要用户不手打 `[meow-memory-dream]` 这种标记就不会误判（这些是插件私有前缀）。 */
+export function hasMemoryMarkerInMessages(messages: readonly unknown[]): boolean {
+  for (const raw of messages) {
+    const msg = raw as { role?: string; content?: unknown }
+    const blocks: unknown[] = Array.isArray(msg?.content)
+      ? msg.content
+      : typeof msg?.content === 'string' ? [{ type: 'text', text: msg.content }] : []
+    for (const b of blocks) {
+      const blk = b as { type?: string; text?: string }
+      if (blk?.type === 'text' && typeof blk.text === 'string'
+        && (blk.text.includes(REFLECT_MARKER) || blk.text.includes(DREAM_MARKER))) return true
+    }
   }
   return false
 }
@@ -2080,7 +2109,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     // waterfall 改 route 直接抛错（"use agent.model.select() before step preparation"）。
     // 新通路：agent/pre-step 里用 agent.model.select() 记录 delegate 选择——payload 带
     // 当前 modelSelection（记主模型用），equal 选择是宿主侧 no-op，每步重选无害。
-    ctx.on('agent/pre-step', async (payload: { agent?: { model?: { select?: unknown }; session?: { header?: SessionHeaderLike } }; modelSelection?: unknown }, next: () => Promise<unknown>) => {
+    ctx.on('agent/pre-step', async (payload: { agent?: { model?: { select?: unknown }; session?: { header?: SessionHeaderLike } }; modelSelection?: unknown; messages?: readonly unknown[] }, next: () => Promise<unknown>) => {
       const agent = payload?.agent
       // 运行时能力检测：宿主没有 agent.model.select（≤0.2.1.x）→ 本 listener 不作为，
       // 覆盖由下方 agent/request waterfall 承担。两路互斥，同一宿主只走一条。
@@ -2089,7 +2118,10 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const sel = payload.modelSelection as ModelRoute | undefined
       const sid = sessionIdOfAgent(agent as never)
       const events = sessionEventsOf(agent.session as never)
-      if (isMemoryTaskTurn(events)) {
+      // v0.45.4：pre-step 时本轮的指令消息**还没落 session**（宿主顺序：pre-step →
+      // append user/message → buildRequest），所以查 events 恒为 false、覆盖从未触发。
+      // 必须配合 payload.messages（本步将要发给模型的消息，已含刚注入的 dream 指令）。
+      if (isMemoryTaskTurn(events) || hasMemoryMarkerInMessages(payload.messages ?? [])) {
         const route: ModelRoute = { provider: spec.provider ?? sel?.provider, model: spec.model ?? sel?.model }
         // +1 = 我们这次 select() 即将 append 的那条（dsh-agent/lib/index.js:198）
         rememberOverride(sid, mainRouteOf(sel ?? {}), route, countModelSelections(events) + 1)
