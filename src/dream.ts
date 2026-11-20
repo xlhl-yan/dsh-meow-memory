@@ -416,8 +416,18 @@ export function startWindowDream(ctx: Context, agent: { session?: { header?: { i
  * 后续组用 steer（next-step）连在 dream 自己的 turn 里（2026-09-10 用户拍板：
  * 多组不分轮——只有第 0 组经 sendMemoryTurn 另起 turn，整个 dream 任务一个
  * turn、一根折叠横条）；steer 失败同旧行为：租约 30min 过期自愈兜底。
+ *
+ * @param onFinished v0.45.6：**最后一组收尾之后**的回调。用于把 delegate 换用的模型
+ *   切回主模型——不靠这一点的话，还原只能等「下一条用户消息」的 agent/pre-step，
+ *   表现为「dream 跑完了模型还停在 delegate，直到我又说了一句话才变回来」。
  */
-export function advanceDream(agent: unknown, dir = '.dsh-meow', onDreamState?: DreamStateCallback, rulesReviewDays: number = DEFAULT_RULES_REVIEW_DAYS): void {
+export function advanceDream(
+  agent: unknown,
+  dir = '.dsh-meow',
+  onDreamState?: DreamStateCallback,
+  rulesReviewDays: number = DEFAULT_RULES_REVIEW_DAYS,
+  onFinished?: (agent: unknown) => void,
+): void {
   const sessionId = (agent as { session?: { header?: { id?: string } } })?.session?.header?.id
   const ws = (agent as { session?: { header?: { cwd?: string } } })?.session?.header?.cwd
   if (typeof sessionId !== 'string' || typeof ws !== 'string' || ws.length === 0) return
@@ -456,6 +466,10 @@ export function advanceDream(agent: unknown, dir = '.dsh-meow', onDreamState?: D
   }
   // 最后一轮完成 → 收尾
   finalizeDream(db, sessionId, ws, dir, lease.T, 'done', rounds.length, onDreamState)
+  // v0.45.6：dream 结束立即把 delegate 换用的模型切回主模型（不再等下一条用户消息）。
+  try {
+    onFinished?.(agent)
+  } catch { /* 回调失败不影响 dream 收尾 */ }
 }
 
 /** 收尾：封存全部条目（updated_at=T）+ 清租约 + 记 last_dream_time。失败不阻塞（日志兜底）。 */

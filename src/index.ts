@@ -1993,6 +1993,11 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     }
   })
 
+  // v0.45.6：dream 收尾时把 delegate 换用的模型切回主模型。
+  // 定义在下方 delegate 块里（那里才有 delegateRestore），这里先声明占位——
+  // turnStoppingCore 是函数，运行时才读它，那时 delegate 块已执行完。
+  let restoreDelegateModelOnDreamEnd: ((agent: unknown) => void) | undefined
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- agent 形状来自宿主事件映射，透传不重塑
   const turnStoppingCore = (agent: any, turn?: number): void => {
     const t0 = Date.now()
@@ -2023,7 +2028,12 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
         } catch { /* 释放失败不阻塞（租约 30min 过期自愈兜底） */ }
         return
       }
-      advanceDream(agent, resolved.projectDir, signalDreamState, resolved.dream.rulesReviewDays) // dream 轮：推进下一组或收尾（含孤儿收尾）
+      // dream 轮：推进下一组或收尾（含孤儿收尾）。
+      // v0.45.6：最后一组收尾后立即还原模型（onFinished），不再等下一条用户消息的 pre-step。
+      advanceDream(
+        agent, resolved.projectDir, signalDreamState, resolved.dream.rulesReviewDays,
+        (a) => { restoreDelegateModelOnDreamEnd?.(a) },
+      )
       return
     }
 
@@ -2105,10 +2115,30 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
         delegateRestore.delete(oldest)
       }
     }
-    // #110（0.2.2+ 契约）：宿主把步骤的 provider/model 在准备阶段定死，agent/request
-    // waterfall 改 route 直接抛错（"use agent.model.select() before step preparation"）。
-    // 新通路：agent/pre-step 里用 agent.model.select() 记录 delegate 选择——payload 带
-    // 当前 modelSelection（记主模型用），equal 选择是宿主侧 no-op，每步重选无害。
+    /** v0.45.6：把某会话的 delegate 路由切回记录的主模型（幂等，无记录则空转）。
+     *  与 pre-step 里的还原分支共用 delegateRestore；区别是它可以**主动**调用
+     *  ——dream 收尾时立刻执行，不必等下一条用户消息。 */
+    restoreDelegateModelOnDreamEnd = (target: unknown): void => {
+      const a = target as { session?: { header?: SessionHeaderLike }; model?: { select?: (s: ModelRoute) => void } } | undefined
+      const sid = sessionIdOfAgent(a as never)
+      const remembered = delegateRestore.get(sid)
+      if (remembered === undefined) return
+      delegateRestore.delete(sid)
+      if (typeof a?.model?.select !== 'function') return
+      try {
+        a.model.select({
+          provider: remembered.main.provider,
+          model: remembered.main.model,
+          ...(remembered.main.reasoningEffort === undefined ? {} : { reasoningEffort: remembered.main.reasoningEffort }),
+        })
+        const cwd = a.session?.header?.cwd
+        if (typeof cwd === 'string' && cwd.length > 0) {
+          appendFileSync(join(cwd, resolved.projectDir, 'dream-debug.log'),
+            `[${new Date().toISOString()}] delegate-restore-on-dream-end pid=${process.pid} sid=${shortSessionId(sid)}` +
+            ` to=${remembered.main.provider}/${remembered.main.model} (was ${remembered.route.provider}/${remembered.route.model})\n`)
+        }
+      } catch { /* 还原失败不阻塞 dream 收尾 */ }
+    }
     ctx.on('agent/pre-step', async (payload: { agent?: { model?: { select?: unknown }; session?: { header?: SessionHeaderLike } }; modelSelection?: unknown; messages?: readonly unknown[] }, next: () => Promise<unknown>) => {
       const agent = payload?.agent
       // 运行时能力检测：宿主没有 agent.model.select（≤0.2.1.x）→ 本 listener 不作为，
