@@ -95,6 +95,8 @@ export const ptBr: Record<UiKey, string> = {
   'settings.field.hitMinCoverage.hint': 'Não injeta quando a fração de palavras-chave da memória encontradas na mensagem fica abaixo deste valor (0 = desligado, 0.4 = recomendado). Nota: com recall híbrido ativo, isto só vale para o caminho léxico de fallback',
   'settings.field.hybridMinScore.label': 'Limiar do recall híbrido',
   'settings.field.hybridMinScore.hint': 'Portão de pontuação total (0.45 × léxico + 0.55 × vetor); abaixo disso nada é injetado. Padrão 0.40 — em 0.12, conversa fiada passa a casar 13/15 memórias irrelevantes',
+  'settings.field.hitCooldownRounds.label': 'Cooldown de acertos (rodadas)',
+  'settings.field.hitCooldownRounds.hint': 'Depois de injetada, uma memória fica fora do pool por pelo menos esta quantidade de rodadas (janela = este valor × acertos por rodada). Padrão 10; 0 desliga o cooldown. A janela antiga tinha 40 entradas fixas — com 8 acertos por rodada, reciclava em apenas 5 rodadas',
   'settings.field.searchContentMax.label': 'Comprimento do corpo nos resultados',
   'settings.field.searchContentMax.hint': 'Caracteres padrão do corpo mostrados por acerto em memory_search / memory_find_similar; 0 = texto completo',
   'settings.field.titleMax.label': 'Comprimento de corte do título',

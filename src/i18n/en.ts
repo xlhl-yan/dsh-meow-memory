@@ -104,6 +104,8 @@ export const en: Record<UiKey, string> = {
   'settings.field.hitMinCoverage.hint': 'Skip injection when the share of memory keywords matched by the message is below this value (0 = off, 0.4 = recommended). Note: with hybrid recall on, this only applies to the lexical fallback path',
   'settings.field.hybridMinScore.label': 'Hybrid recall threshold',
   'settings.field.hybridMinScore.hint': 'Total score gate (0.45 × lexical + 0.55 × vector); below it nothing is injected. Default 0.40 — setting it to 0.12 makes small talk match 13/15 irrelevant memories',
+  'settings.field.hitCooldownRounds.label': 'Hit cooldown (rounds)',
+  'settings.field.hitCooldownRounds.hint': 'After a memory is injected, it stays out of the hit pool for at least this many rounds (window = this value × per-round hits). Default 10; 0 disables the cooldown. The old window was a fixed 40 entries — with 8 hits per round it recycled after just 5 rounds',
   'settings.field.searchContentMax.label': 'Search result body length',
   'settings.field.searchContentMax.hint': 'Default characters of body shown per hit in memory_search / memory_find_similar; 0 = full text',
   'settings.field.titleMax.label': 'Guide title truncation length',

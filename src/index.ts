@@ -271,6 +271,12 @@ const config = z.object({
    *    0.12 → 负样本误命中 **13/15**（「今天天气不错」这类闲聊会被注入一堆无关记忆）
    *  原因：向量分对任何句子都有 ~0.5 的基线余弦，门槛就是拦这类噪声的唯一闸门。 */
   hybridMinScore: z.number().min(0).max(1).default(0.40),
+  /** v0.46.0 命中冷却轮数：同一条记忆被注入后，至少隔这么多轮才允许再次命中。
+   *
+   *  之前去重窗口固定 40 条（不是 40 轮）：`hitTopK=8` 时只覆盖最近 5 轮，第 6 轮起
+   *  最早那批又被选中，体感是「同一批记忆每隔几轮就回来一次」。
+   *  现在按轮算：窗口 = hitCooldownRounds × hitTopK。0 = 关闭冷却。 */
+  hitCooldownRounds: z.number().min(0).max(1000).default(10),
   /** 命中诊断日志（默认 false）：命中判定无论 0 条还是 N 条都打一行，含命中 id/coverage。
    *  排查「怎么从来不命中」时打开。⚠️ 这是排查工具不是日常开关，不进设置页表单——
    *  需求方拍板 2026-11-13；改它请走 cordis.patch.yml 或配置文件。 */
@@ -403,6 +409,7 @@ export function validateConfigUserLayer(value: unknown): void {
   reqNum('hitTopK')
   reqNum('hitMinCoverage')
   reqNum('hybridMinScore')
+  reqNum('hitCooldownRounds')
   reqNum('titleMax')
   reqBool('reflect')
   reqNum('reflectTurns')
@@ -502,6 +509,8 @@ interface ResolvedConfig {
   hitMinCoverage: number
   /** 混合召回总分门槛（开了 hybrid 时生效，替代 hitMinCoverage）。 */
   hybridMinScore: number
+  /** 命中冷却轮数（窗口 = 本值 × hitTopK）。 */
+  hitCooldownRounds: number
   /** 命中诊断日志开关（默认 false；不进设置页表单）。 */
   hitDebug: boolean
   /** 默认信任工作区记忆库（关掉 #64 预置库防护）。 */
@@ -534,6 +543,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     hitTopK: c.hitTopK ?? 3,
     hitMinCoverage: c.hitMinCoverage ?? 0.15,
     hybridMinScore: c.hybridMinScore ?? 0.40,
+    hitCooldownRounds: c.hitCooldownRounds ?? 10,
     hitDebug: c.hitDebug ?? false,
     trustByDefault: c.trustByDefault ?? true,
     searchContentMax: c.searchContentMax ?? 400,
@@ -845,7 +855,7 @@ const SETTINGS_SOURCE_WAIT_MS = 250
 // 注册期消费的字段（projectDir/homeDir/enabled/delegate.modelSpec + setPromptLang 的
 // 启动调用）保持冻结：热改需要 dispose+重入，设置页按「需重载」语义对待（#26 同口径）。
 
-const LIVE_CONFIG_KEYS = ['hitTopK', 'hitMinCoverage', 'hybridMinScore', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
+const LIVE_CONFIG_KEYS = ['hitTopK', 'hitMinCoverage', 'hybridMinScore', 'hitCooldownRounds', 'titleMax', 'reflect', 'reflectTurns', 'autoMigrate', 'promptLang', 'disabledWorkspaces'] as const
 const LIVE_DREAM_KEYS = ['enabled', 'idleMinutes', 'suppressWindows', 'suppressLeadMinutes', 'checkMinutes', 'timeZone', 'rulesReviewDays'] as const
 
 /** 工作区是否在停用名单（归一后精确匹配）。导出供测试直调。 */
@@ -1621,7 +1631,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     ws: string,
     sid: string,
     text: string,
-    opts: { hitTopK: number; titleMax: number; hitMinCoverage: number; hitDebug: boolean; hybridMinScore: number },
+    opts: { hitTopK: number; titleMax: number; hitMinCoverage: number; hitDebug: boolean; hybridMinScore: number; hitCooldownRounds: number },
     dir: string,
     qv: Float32Array | null,
   ): Promise<HitResult | null> => {
@@ -1782,6 +1792,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
           hybridMinScore: resolved.hybridMinScore,
+          hitCooldownRounds: resolved.hitCooldownRounds,
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
@@ -1951,6 +1962,7 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
           titleMax: resolved.titleMax,
           hitMinCoverage: resolved.hitMinCoverage,
           hybridMinScore: resolved.hybridMinScore,
+          hitCooldownRounds: resolved.hitCooldownRounds,
           hitDebug: resolved.hitDebug,
         }, resolved.projectDir, qv)
         try {
@@ -2597,7 +2609,7 @@ export { parseModelSpec, REFLECT_DELEGATE_MARKER, REFLECT_DONE_DELEGATE_MARKER, 
 export { collectDreamStates, headerOf, type PersistedSessionLike } from './dream-signal.js'
 export { MemoryDb, memoryDbPath, getDb, closeAllDbs, backupMemoryDb, LEVELS, newId, PROJECT_SUBCATEGORIES, projectList, projectCovers, projectLabel, relativeTime, isGlobalProject, isGlobalScope, globalProjectMarker, GLOBAL_PROJECT_CANON, GLOBAL_PROJECT_CANON_EN } from './db.js'
 export { migrateLegacy } from './migrate.js'
-export { buildHitInjection, buildInjection, buildReinjection, buildProjectSectionText, readSeen, markSearched, markAccessed, readInjected, markInjected, markProjectQueried, readProjectQueried, markWritten, readWritten, markReinjectPending, clearReinjectPending, isReinjectPending, MAX_REINJECT_PROJECTS, MAX_REINJECT_WRITTEN, sessionsFile, getCurrentProject, setCurrentProject, releaseSeen, setHitDebugLogger } from './inject.js'
+export { buildHitInjection, buildInjection, buildReinjection, buildProjectSectionText, readSeen, markSearched, markAccessed, readInjected, markInjected, markProjectQueried, readProjectQueried, markWritten, readWritten, markReinjectPending, clearReinjectPending, isReinjectPending, MAX_REINJECT_PROJECTS, MAX_REINJECT_WRITTEN, MAX_RECENT_INJECTED, DEFAULT_HIT_COOLDOWN_ROUNDS, hitCooldownWindowSize, readRecentInjected, sessionsFile, getCurrentProject, setCurrentProject, releaseSeen, setHitDebugLogger } from './inject.js'
 export { buildReflectMessage, consecutiveToolSteps, scanTurn } from './reflect.js'
 export { tokenize, stemEn, search, findSimilar, topicDrift, recencyWeight } from './bm25.js'
 export { fillTemplate, keyedValue, resolveSlotText, setPromptLang, getPromptLang, DEFAULT_LANG, SLOTS } from './prompt-loader.js'

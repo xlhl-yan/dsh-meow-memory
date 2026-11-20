@@ -36,6 +36,9 @@ export interface InjectOptions {
    *  池子——0.40 对难句只剩 1-2 条候选，精排无从下手；最终由 rerank 分数决定取舍，
    *  所以这里放宽是安全的。 */
   hybridMinScore?: number
+  /** v0.46.0：同一条记忆被注入后至少隔多少轮才允许再次命中（默认 10）。
+   *  0 = 关闭冷却。窗口长度 = 轮数 × hitTopK，夹在 [1, MAX_RECENT_INJECTED]。 */
+  hitCooldownRounds?: number
 }
 
 const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 0.15, hitDebug: false, hybrid: true }
@@ -45,10 +48,28 @@ const DEFAULT_OPTS: InjectOptions = { hitTopK: 3, titleMax: 40, hitMinCoverage: 
  *  真实诉求永远匹配不到（长会话实测命中率 0%）。4000 覆盖绝大多数消息全文。 */
 const MAX_QUERY_CHARS = 4000
 
-/** 「最近注入窗口」长度：命中去重只看最近这么多条注入记录，而不是整会话的注入全集。
+/** 「最近注入窗口」长度上限：命中去重只看最近这么多条注入记录，而不是整会话的注入全集。
  *  旧语义（整会话 excluded）在长会话里会把候选池清零——本会话写的记忆先被
- *  source_session 排除，剩下的又全在 injected 里，最终没有一条能再被命中。 */
-export const MAX_RECENT_INJECTED = 40
+ *  source_session 排除，剩下的又全在 injected 里，最终没有一条能再被命中。
+ *
+ *  ⚠️ v0.46.0：**实际窗口按轮数算**（{@link hitCooldownWindowSize}），这个常量只是硬上限。
+ *  之前固定 40 条 → `hitTopK=8` 时只覆盖最近 5 轮，第 6 轮起最早那批又被选中，
+ *  体感是「同一条记忆隔几轮就回来一次」。 */
+export const MAX_RECENT_INJECTED = 240
+
+/** 默认去重轮数：同一条记忆被注入后，至少隔这么多轮才允许再次命中。
+ *  0 = 关闭冷却（回到 v0.45.x 的「40 条滑窗」行为）。 */
+export const DEFAULT_HIT_COOLDOWN_ROUNDS = 10
+
+/** 去重窗口实际长度 = 轮数 × 每轮注入条数（再夹在 [hitTopK, MAX_RECENT_INJECTED]）。
+ *
+ *  为什么要按轮算：窗口是「条数」，而用户感知的是「轮数」。`hitTopK` 一变，
+ *  同样 40 条窗口覆盖的轮数就从 13 轮（topK=3）变成 5 轮（topK=8），行为漂移。 */
+export function hitCooldownWindowSize(cooldownRounds: number, hitTopK: number): number {
+  if (cooldownRounds <= 0) return MAX_RECENT_INJECTED
+  const perRound = Math.max(1, hitTopK)
+  return Math.max(perRound, Math.min(MAX_RECENT_INJECTED, Math.round(cooldownRounds * perRound)))
+}
 
 /** 命中链路的最少命中 token 数（v0.37.0）。只撞上 1 个词就注入是误注入的主要来源：
  *  实测「等视频渲染完再说」撞一个「渲染」就注入 4 条全无关的记忆。 */
@@ -205,13 +226,21 @@ function writeSeenFile(workspace: string, sessionId: string, seen: SessionSeen, 
   }), 'utf8')
 }
 
+/** v0.46.0：读「最近注入窗口」（命中链路真正用来排除的那个列表）。
+ *  与 readSeen/injected 的区别：injected 是整会话永久累计，recentInjected 只保留
+ *  最近 N 条（N = 冷却轮数 × 每轮条数）——窗口外的条目允许再次命中。 */
+export function readRecentInjected(workspace: string, sessionId: string, dir = '.dsh-meow'): string[] {
+  return readSeenFile(workspace, sessionId, dir).recentInjected
+}
+
 /** 读本会话已注入 id 列表（文件不存在返回空数组）。 */
 export function readInjected(workspace: string, sessionId: string, dir = '.dsh-meow'): string[] {
   return readSeenFile(workspace, sessionId, dir).injected
 }
 
-/** 追加写入已注入 id（同时推进「最近注入窗口」）。 */
-export function markInjected(workspace: string, sessionId: string, ids: string[], dir = '.dsh-meow'): void {
+/** 追加写入已注入 id（同时推进「最近注入窗口」）。
+ *  @param windowSize 去重窗口长度（条）。缺省 = MAX_RECENT_INJECTED。 */
+export function markInjected(workspace: string, sessionId: string, ids: string[], dir = '.dsh-meow', windowSize = MAX_RECENT_INJECTED): void {
   if (ids.length === 0) return
   const seen = readSeenFile(workspace, sessionId, dir)
   const set = new Set(seen.injected)
@@ -220,7 +249,7 @@ export function markInjected(workspace: string, sessionId: string, ids: string[]
   // 滑窗：新注入的排最后，超出长度丢最旧的。
   const recent = seen.recentInjected.filter((id) => !ids.includes(id))
   recent.push(...ids)
-  seen.recentInjected = recent.slice(-MAX_RECENT_INJECTED)
+  seen.recentInjected = recent.slice(-Math.max(1, windowSize))
   writeSeenFile(workspace, sessionId, seen, dir)
 }
 
@@ -857,9 +886,11 @@ export function commitHitInjection(
   sessionId: string,
   items: HitCandidate[],
   dir: string,
+  /** v0.46.0：去重窗口长度（条），由 hitCooldownRounds × hitTopK 算得。缺省用硬上限。 */
+  cooldownWindow?: number,
 ): void {
   const ids = items.map((h) => h.id)
-  markInjected(workspace, sessionId, ids, dir)
+  markInjected(workspace, sessionId, ids, dir, cooldownWindow)
   for (const h of items) db.bumpHit(h.level as Parameters<MemoryDb['bumpHit']>[0], h.id)
 }
 
@@ -885,7 +916,11 @@ export function buildHitInjection(
     keywords: (h as { keywords?: string[] }).keywords ?? [],
   }))
   const text = formatHitBlock(candidates)
-  if (!skipCommit) commitHitInjection(db, workspace, sessionId, candidates, dir)
+  const cooldownWindow = hitCooldownWindowSize(
+    o.hitCooldownRounds ?? DEFAULT_HIT_COOLDOWN_ROUNDS,
+    Math.max(1, o.hitTopK),
+  )
+  if (!skipCommit) commitHitInjection(db, workspace, sessionId, candidates, dir, cooldownWindow)
   // topScore 用 hitQuery 内部算出的混合分（命中为空时上面已 return null）
   const topScore = (fresh[0] as { hybridScore?: number; score?: number }).hybridScore
     ?? (fresh[0] as { score?: number }).score

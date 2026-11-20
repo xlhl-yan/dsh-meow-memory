@@ -2651,6 +2651,28 @@ check('parseModelSpec blank → undefined', parseModelSpec('') === undefined && 
   }
 }
 
+// v0.46.0：命中冷却按「轮数」算，不再固定 40 条。
+// 旧行为：hitTopK=8 时 40 条窗口只覆盖 5 轮，第 6 轮起最早那批又被选中。
+{
+  const { hitCooldownWindowSize, DEFAULT_HIT_COOLDOWN_ROUNDS, MAX_RECENT_INJECTED } = await import('./lib/index.js')
+  check('v0.46.0 冷却窗口 = 轮数 × 每轮条数', hitCooldownWindowSize(10, 8) === 80, String(hitCooldownWindowSize(10, 8)))
+  check('v0.46.0 冷却窗口：topK=3 时 10 轮 = 30 条', hitCooldownWindowSize(10, 3) === 30, String(hitCooldownWindowSize(10, 3)))
+  check('v0.46.0 冷却窗口夹在硬上限内', hitCooldownWindowSize(1000, 8) === MAX_RECENT_INJECTED, String(hitCooldownWindowSize(1000, 8)))
+  check('v0.46.0 冷却窗口至少一整轮', hitCooldownWindowSize(0, 8) === MAX_RECENT_INJECTED && hitCooldownWindowSize(1, 8) === 8)
+  check('v0.46.0 默认冷却 10 轮', DEFAULT_HIT_COOLDOWN_ROUNDS === 10)
+  // 窗口语义：注入超过窗口长度的条目后，最旧的应当滑出（可再次命中）
+  const { markInjected, readRecentInjected: rri } = await import('./lib/index.js')
+  const wsCool = mkdtempSync(join(tmpdir(), 'mm-cool-'))
+  const sidCool = 's-cool'
+  const win = hitCooldownWindowSize(2, 5) // 2 轮 × 5 条 = 10
+  const recentCool = () => rri(wsCool, sidCool, '.dsh-meow')
+  markInjected(wsCool, sidCool, ['a1','a2','a3','a4','a5'], '.dsh-meow', win)
+  markInjected(wsCool, sidCool, ['b1','b2','b3','b4','b5'], '.dsh-meow', win)
+  check('v0.46.0 窗口内两轮共 10 条都在排除列表', recentCool().length === 10 && recentCool().includes('a1') && recentCool().includes('b5'), JSON.stringify(recentCool()))
+  markInjected(wsCool, sidCool, ['c1','c2','c3','c4','c5'], '.dsh-meow', win)
+  check('v0.46.0 第三轮后 a1 滑出窗口（可再次命中）', !recentCool().includes('a1') && recentCool().includes('c1'), JSON.stringify(recentCool()))
+}
+
 // isMemoryTaskTurn 单元：跨 turn 边界（marker 只认当前 turn，上一轮的 marker 不残留）
 {
   const { isMemoryTaskTurn } = await import('./lib/index.js')

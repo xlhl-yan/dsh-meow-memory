@@ -94,6 +94,7 @@ const FIELDS: GroupSpec[] = [
       { key: 'hitTopK', label: 'settings.field.hitTopK.label', type: 'num', hint: 'settings.field.hitTopK.hint' },
       { key: 'hitMinCoverage', label: 'settings.field.hitMinCoverage.label', type: 'num', hint: 'settings.field.hitMinCoverage.hint' },
       { key: 'hybridMinScore', label: 'settings.field.hybridMinScore.label', type: 'num', hint: 'settings.field.hybridMinScore.hint' },
+      { key: 'hitCooldownRounds', label: 'settings.field.hitCooldownRounds.label', type: 'num', hint: 'settings.field.hitCooldownRounds.hint' },
       { key: 'searchContentMax', label: 'settings.field.searchContentMax.label', type: 'num', hint: 'settings.field.searchContentMax.hint' },
       { key: 'titleMax', label: 'settings.field.titleMax.label', type: 'num', hint: 'settings.field.titleMax.hint' },
     ],
