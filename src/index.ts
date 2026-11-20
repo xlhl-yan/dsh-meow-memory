@@ -659,11 +659,19 @@ function mainRouteOf(config: ModelRoute): ModelRoute {
   return { provider: config.provider, model: config.model, ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: String(config.reasoningEffort) }) }
 }
 
-// #71：覆盖之后用户是否亲手选过模型？宿主 selectForNextRequest 会 append model/selection。
-// 反向扫描：先撞到 model/selection = 用户选择（含选中 delegate 本身）；先撞到路由不等于
-// delegate 的 request/header = 覆盖之前的历史，结束（覆盖前后的 header 都是 delegate/主模型，
-// 不会误判）。零分配，O(尾部事件)。
-function userSelectedAfterOverride(events: readonly unknown[], route: ModelRoute): boolean {
+// ⚠️ **已废弃，不要再用（v0.45.3）**。
+//
+// 原意：覆盖模型后，如果用户亲手选过模型，就把选择权让给用户、不还原。
+// 实现：反向扫描事件，撞到 `model/selection` 就判定「用户选过」。
+//
+// **错在哪**：`dsh-agent` 的 `AgentModel.select()` 内部会 `session.append('model/selection', …)`
+// （dsh-agent/lib/index.js:196-199）。所以**插件自己调 select() 覆盖的那一刻，就 append 了一条
+// model/selection**——下一轮扫描必然撞到它 → 永远返回 true → **永不还原**。
+// 表现为「模型切到 delegate 后回不来」，用户只能手动切回。
+//
+// 替代方案见 countModelSelections：覆盖时记下「预期的事件数」（含我们自己那条 +1），
+// 还原时若实际数量更多 = 期间有人（用户或别的插件）又选过 → 放行。
+function _userSelectedAfterOverrideDeprecated(events: readonly unknown[], route: ModelRoute): boolean {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i] as { type?: string; data?: { header?: { config?: ModelRoute } } } | undefined
     if (e?.type === 'model/selection') return true
@@ -673,6 +681,18 @@ function userSelectedAfterOverride(events: readonly unknown[], route: ModelRoute
     }
   }
   return false
+}
+
+/** v0.45.3：数本会话历史上出现过多少条 `model/selection`。
+ *
+ *  用途：区分「用户亲手选的模型」和「插件自己 select() 产生的」——两者在事件流里长得
+ *  一模一样（都是 `model/selection`，值也都可能是 delegate 路由），**唯一能分开的是数量**：
+ *  覆盖时记下 `当前数 + 1`（+1 = 我们即将 append 的那条），下一轮还原时若实际数量更多，
+ *  说明期间又有人选过，此时应该尊重那次选择、不还原。 */
+function countModelSelections(events: readonly unknown[]): number {
+  let n = 0
+  for (const e of events) if ((e as { type?: string })?.type === 'model/selection') n++
+  return n
 }
 
 /** 最近一个 turn/end 的 reason.kind（aborted/interrupted 表示用户停止，不反思不推进）。 */
@@ -2041,11 +2061,14 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
     const spec = resolved.delegate.modelSpec
     const delegateEffort = resolved.delegate.effort
     // #71：sid → 主模型路由 + 我们写下的 delegate 路由（配对保存，避免把 delegate 当主模型）
-    const delegateRestore = new Map<string, { main: ModelRoute; route: ModelRoute }>()
+    //      + selCount：覆盖完成时「事件流里应有的 model/selection 条数」（含我们自己那条）。
+    //      v0.45.3 新增，用来区分「用户亲手选的」和「插件 select() 触发的」——两者在事件流里
+    //      一模一样，只能靠数量增量判断。
+    const delegateRestore = new Map<string, { main: ModelRoute; route: ModelRoute; selCount: number }>()
     const MAX_DELEGATE_TRACKED = 512
-    const rememberOverride = (sid: string, main: ModelRoute, route: ModelRoute): void => {
+    const rememberOverride = (sid: string, main: ModelRoute, route: ModelRoute, selCount: number): void => {
       if (sid === 'unknown' || delegateRestore.has(sid)) return
-      delegateRestore.set(sid, { main, route })
+      delegateRestore.set(sid, { main, route, selCount })
       // 进程级 Map 兜底上限（Map 保留插入序）：只保最近 MAX_DELEGATE_TRACKED 个会话
       while (delegateRestore.size > MAX_DELEGATE_TRACKED) {
         const oldest = delegateRestore.keys().next().value
@@ -2068,7 +2091,8 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const events = sessionEventsOf(agent.session as never)
       if (isMemoryTaskTurn(events)) {
         const route: ModelRoute = { provider: spec.provider ?? sel?.provider, model: spec.model ?? sel?.model }
-        rememberOverride(sid, mainRouteOf(sel ?? {}), route)
+        // +1 = 我们这次 select() 即将 append 的那条（dsh-agent/lib/index.js:198）
+        rememberOverride(sid, mainRouteOf(sel ?? {}), route, countModelSelections(events) + 1)
         ctx.logger.info(`meow-memory: memory task turn → model override ${route.provider}/${route.model}${delegateEffort === undefined ? ' (effort stripped)' : ` (effort ${delegateEffort})`}`)
         // #98 effort 语义映射到 select：strip=缺省（0.2.2 文档：omitted effort follows
         // adapter defaults，天然=剥离）；inherit=传主模型当前 effort；显式值原样传。
@@ -2084,7 +2108,13 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const remembered = delegateRestore.get(sid)
       if (remembered === undefined) return next() // 没覆盖过 / 已还原：零开销放行
       delegateRestore.delete(sid)
-      if (userSelectedAfterOverride(events, remembered.route)) return next()
+      // v0.45.3：用「model/selection 条数增量」判断期间有没有人又选过。
+      // 覆盖时记的是 count+1（含我们自己 append 的那条），所以：
+      //   现在 > 记录值  → 期间多了选择（用户亲手选，或别的插件）→ 尊重它，放行
+      //   现在 == 记录值 → 没人动过，模型是被我们覆盖成 delegate 的 → 还原
+      // 为什么不能再用「撞到 model/selection 就算用户选的」：插件自己 select() 也会 append，
+      // 那条会永远被误判成用户选择，导致永不还原（v0.45.2 之前的真实故障）。
+      if (countModelSelections(events) > remembered.selCount) return next()
       if (sel?.provider !== remembered.route.provider || sel?.model !== remembered.route.model) return next() // 用户换了别的模型：放行
       ctx.logger.info(`meow-memory: restore main model ${remembered.main.provider}/${remembered.main.model} after memory task turn`)
       ;(agent as unknown as { model: { select: (s: ModelRoute) => void } }).model.select({
@@ -2108,7 +2138,9 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
         // 记错会把 delegate 存成主模型（真机日志一次反思有 2 个 header）。无会话 id 不记（防串会话）。
         const route: ModelRoute = { provider: spec.provider ?? config.provider, model: spec.model ?? config.model }
         if (sid !== 'unknown' && !delegateRestore.has(sid)) {
-          delegateRestore.set(sid, { main: mainRouteOf(config), route })
+          // 旧宿主（无 agent.model.select）走 waterfall 改 config，**不 append**
+          // model/selection，所以这里记「当前条数」而不是 +1。
+          delegateRestore.set(sid, { main: mainRouteOf(config), route, selCount: countModelSelections(events) })
           // 进程级 Map 兜底上限（Map 保留插入序）：只保最近 MAX_DELEGATE_TRACKED 个会话
           while (delegateRestore.size > MAX_DELEGATE_TRACKED) {
             const oldest = delegateRestore.keys().next().value
@@ -2130,7 +2162,8 @@ async function applyInner(ctx: Context, config: unknown): Promise<void> {
       const remembered = delegateRestore.get(sid)
       if (remembered === undefined) return config // 没覆盖过 / 已还原：零开销放行
       delegateRestore.delete(sid)
-      if (userSelectedAfterOverride(events, remembered.route)) return config
+      // v0.45.3：见上方 pre-step 分支注释（用 selCount 增量判断期间有没有新选择）。
+      if (countModelSelections(events) > remembered.selCount) return config
       if (config.provider !== remembered.route.provider || config.model !== remembered.route.model) return config // 用户换了别的模型：放行
       ctx.logger.info(`meow-memory: restore main model ${remembered.main.provider}/${remembered.main.model} after memory task turn`)
       const { reasoningEffort: _inherited, ...rest } = config
